@@ -92,6 +92,9 @@ $SIG{INT} = $SIG{TERM} = $SIG{HUP} = 'Terminate';
 my $ipt = "$Config{'iptables.path'}" . 'iptables'; # iptables command
 my $ips = "$Config{'ipset.path'}" . 'ipset';       # ipset command
 
+# INPUT rule that applies the set: -i eno1 -m set --match-set sipban src -j DROP
+my $ipt_rule = "-i $Config{'iptables.interface'} -m set --match-set $Config{'ipset.set_name'} src -j $Config{'iptables.rule'}";
+
 # Open Socket connection to accept clients requests
 my $server = IO::Socket::INET->new(LocalPort => "$Config{'control.port'}",
                              LocalAddr => "$Config{'control.address'}",
@@ -283,16 +286,28 @@ sub Ipset_Prune_Block {
 # Iptables functions #
 #--------------------#
 
-sub Iptables_Create_Chain {
-    # /sbin/iptables -t filter -I INPUT -i eno1 -m set --match-set sipban src -j DROP
-    my $rv = qx($ipt -t filter -I INPUT -i $Config{'iptables.interface'} -m set --match-set $Config{'ipset.set_name'} src -j $Config{'iptables.rule'});
-    print LOG Time_Stamp() . " CHAIN => $Config{'iptables.chain'} created\n";
+sub Iptables_Exists_Rule {
+    # /sbin/iptables -t filter -C INPUT -i eno1 -m set --match-set sipban src -j DROP
+    system("$ipt -t filter -C INPUT $ipt_rule > /dev/null 2>&1");
+    return ($? == 0) ? 1 : 0;
 }
 
-sub Iptables_Erase_Chain {
+sub Iptables_Create_Rule {
+    # /sbin/iptables -t filter -I INPUT -i eno1 -m set --match-set sipban src -j DROP
+    my $rv = qx($ipt -t filter -I INPUT $ipt_rule);
+    print LOG Time_Stamp() . " IPTABLES => INPUT rule for set $Config{'ipset.set_name'} created\n";
+}
+
+sub Iptables_Erase_Rule {
     # /sbin/iptables -t filter -D INPUT -i eno1 -m set --match-set sipban src -j DROP
-    my $rv = qx($ipt -t filter -D INPUT -i $Config{'iptables.interface'} -m set --match-set $Config{'ipset.set_name'} src -j $Config{'iptables.rule'});
-    print LOG Time_Stamp() . " CHAIN => $Config{'iptables.chain'} erased\n";
+    # deletes every copy: older versions inserted it again after a crash, and
+    # the set cannot be destroyed while a rule uses it
+    my $copies = 0;
+    while (Iptables_Exists_Rule() && $copies < 100) {
+        my $rv = qx($ipt -t filter -D INPUT $ipt_rule);
+        $copies++;
+    }
+    print LOG Time_Stamp() . " IPTABLES => INPUT rule for set $Config{'ipset.set_name'} erased\n";
 }
 
 #--------------------#
@@ -525,7 +540,7 @@ sub Log_Once {
 }
 
 sub Terminate {
-    Iptables_Erase_Chain();
+    Iptables_Erase_Rule();
     Ipset_Save();
     Ipset_Destroy_Set();
 
@@ -1010,10 +1025,10 @@ else {
 }
 Ipset_Purge_White_List();
 
-# Check if exists the chain name or else create one
-my @Answer = qx($ipt -S $Config{'iptables.chain'});
-if ($#Answer < 0) {
-    Iptables_Create_Chain();
+# Insert the INPUT rule, unless it is still there because sipban was not
+# stopped cleanly
+unless (Iptables_Exists_Rule()) {
+    Iptables_Create_Rule();
 }
 
 # Main Cycle
