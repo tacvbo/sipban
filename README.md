@@ -61,7 +61,6 @@ Log examples:
 * I conserve the time keeping for support version older than 6. This will be depreciated in the next version.
 * I only insert in the top of the iptables INPUT rules a single statement, in place of generate an adittional chain.
 * Ipset can handle a complet ip/class ban. With **sipban_admin.bash** you can block entire ip/class.
-* I keep the old version with his configuration file with the name "sipban_legacy.pl" and "sipban_legacy.conf"
 * Is tested in Ubuntu 22.04, Debian 12 and Fedora 41. I don't have other Linux Distros to test, but if you have any comments about it, please let me know.
 * As part of Sipban, i put a bash script called "sipban_admin.bash", is only a wrapper for common ipset commands for easy admin of the sipban ipset "set".
 * The SystemD file wait for "netfilter-persistent.service" to start.
