@@ -1,0 +1,13 @@
+#!/bin/bash
+# Fake iptables for the tests: $FAKE_STATE/rules counts the copies of the
+# sipban INPUT rule, and every call is appended to $FAKE_STATE/calls.log.
+# It only implements -C, -I and -D (always called as "-t filter <command>").
+D="${FAKE_STATE:?FAKE_STATE is not set}"
+echo "iptables $*" >> "$D/calls.log"
+copies=$(cat "$D/rules" 2>/dev/null || echo 0)
+case "$3" in
+  -C) [ "$copies" -gt 0 ] && exit 0 || exit 1 ;;
+  -I) echo $((copies + 1)) > "$D/rules" ;;
+  -D) [ "$copies" -gt 0 ] && echo $((copies - 1)) > "$D/rules" || exit 1 ;;
+esac
+exit 0

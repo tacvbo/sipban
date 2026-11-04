@@ -337,6 +337,12 @@ options:
     -u [file] (add the IP addresses listed in a file)
 ```
 
+## Tests
+
+`test/test.sh` runs sipban against a simulated AMI, with fake ipset and
+iptables commands, and checks the results. It does not need Asterisk or root;
+see [test/README.md](test/README.md).
+
 ## To-do
 
    - IPv6 support

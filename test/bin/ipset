@@ -1,0 +1,30 @@
+#!/bin/bash
+# Fake ipset for the tests: the members of the set are lines of
+# $FAKE_STATE/members, and every call is appended to $FAKE_STATE/calls.log.
+# It only implements the commands that sipban.pl uses.
+D="${FAKE_STATE:?FAKE_STATE is not set}"
+echo "ipset $*" >> "$D/calls.log"
+[ "$1" = "-q" ] && shift
+case "$1" in
+  list)
+    if [ "$2" = "-t" ]; then
+      if [ -e "$D/set" ]; then echo "Name: $3"; else echo "The set does not exist" >&2; exit 1; fi
+    else
+      [ -e "$D/set" ] || exit 1
+      echo "Name: $2"; echo "Type: hash:net"; echo "Members:"
+      [ -e "$D/members" ] && sed 's/$/ timeout 600000/' "$D/members"
+    fi ;;
+  create)  touch "$D/set" ;;
+  destroy) rm -f "$D/set" "$D/members" ;;
+  save)
+    echo "create $2 hash:net family inet hashsize 4096 maxelem 65536 timeout 604800"
+    [ -e "$D/members" ] && sed "s/^/add $2 /; s/\$/ timeout 600000/" "$D/members" ;;
+  restore)
+    touch "$D/set" "$D/members"
+    while read -r command name ip rest; do
+      [ "$command" = add ] && { grep -qxF "$ip" "$D/members" || echo "$ip" >> "$D/members"; }
+    done ;;
+  add) touch "$D/members"; grep -qxF "$3" "$D/members" || echo "$3" >> "$D/members" ;;
+  del) touch "$D/members"; grep -vxF "$3" "$D/members" > "$D/members.tmp"; mv "$D/members.tmp" "$D/members" ;;
+esac
+exit 0
