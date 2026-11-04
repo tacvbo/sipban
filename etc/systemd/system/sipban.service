@@ -1,5 +1,5 @@
 [Unit]
-Description=SIP Ban Service
+Description=SIPban, blocks SIP attackers using the Asterisk AMI security events
 After=network.target netfilter-persistent.service
 
 [Service]
@@ -10,7 +10,7 @@ ExecStart=/usr/local/bin/sipban.pl
 Restart=always
 RestartSec=3
 
-# Prevent duplication of logs with color codes to /var/log/messages
+# sipban writes its own log (log.file in /etc/sipban.conf); discard stdout
 StandardOutput=null
 
 [Install]

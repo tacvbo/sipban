@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # chkconfig: 35 99 99
-# description: Sip Ban Service
+# description: SIPban, blocks SIP attackers using the Asterisk AMI security events
 # processname: sipban.pl
 
 # source function library
@@ -13,14 +13,14 @@ RETVAL=0
 
 case "$1" in
   start)
-	echo -n "Starting SIP Ban Service: "
+	echo -n "Starting SIPban: "
 	daemon $DAEMON $OPTIONS
 	RETVAL=$?
 	echo
 	[ $RETVAL -eq 0 ] && touch /var/lock/subsys/sipban.pl
 	;;
   stop)
-	echo -n "Shutting down SIP Ban Service: "
+	echo -n "Stopping SIPban: "
 	killproc sipban.pl
 	RETVAL=$?
 
@@ -33,7 +33,7 @@ case "$1" in
 	RETVAL=$?
 	;;
   reload)
-	echo -n "Reloading SIP Ban Service: "
+	echo -n "Reloading SIPban: "
 	killproc sipban.pl -HUP
 	RETVAL=$?
 	echo

@@ -2,11 +2,11 @@
 use strict;
 
 if ( $ARGV[0] ne '' ) {
-    open P, "< $ARGV[0]" || die "Can\'t open file\n";
+    open P, "< $ARGV[0]" || die "Can\'t open the log file\n";
 
     my %attack_ip = ();
 
-    while(<P>) { # Read records
+    while(<P>) { # one log line per record
         chomp;
         if ($_ =~ / BLOCK /) { 
             my ($ip) = $_ =~ / BLOCK => (\d+\.\d+\.\d+\.\d+)/;

@@ -1,18 +1,19 @@
 #!/usr/bin/perl
 #======================================================================#
-# Program => sipban.pl (In Perl 5.0)                     version 1.1.0 #
+# Program => sipban.pl (Perl 5)                          version 1.1.0 #
 #======================================================================#
-# Autor => Fernando "El Pop" Romo                   (pop@cofradia.org) #
+# Author => Fernando "El Pop" Romo                  (pop@cofradia.org) #
 # Creation date => 07/jun/2019                                         #
 # Modified => 04/nov/2026 by tacvbo (https://github.com/tacvbo/sipban) #
-#             trusted ip's (PJSIP contacts and successful auth), new   #
-#             PJSIP events and unanswered challenge detection.         #
+#             trusted IPs (PJSIP contacts and successful               #
+#             authentication), new PJSIP events and detection of       #
+#             unanswered challenges.                                   #
 #----------------------------------------------------------------------#
-# Info => This program is a server who make a connection with a        #
-#         asterisk server trough the TCP port 5038,take security       #
-#         Events and use iptables to block suspicious SIP registers    #
+# Info => Connects to the Asterisk Manager Interface (AMI), reads the  #
+#         security events and blocks the IP addresses of SIP attackers #
+#         with ipset and iptables.                                     #
 #----------------------------------------------------------------------#
-#        This code are released under the GPL 3.0 License.             #
+#        This code is released under the GPL 3.0 License.              #
 #                                                                      #
 #                  (c) 2019-2024 - Fernando Romo                       #
 #                                                                      #
@@ -48,19 +49,20 @@ tie %cache, 'Tie::Cache', 1000, { Debug => 0 };
 
 if (defined($ARGV[0])) {
     if ($ARGV[0] eq "-d") {
-        defined(my $pid = fork) or die "Can't Fork: $!";
+        defined(my $pid = fork) or die "Can't fork: $!";
         exit if $pid;
         setsid or die "Can't start a new session: $!";
     }
 }
 
-# check PID File
-die "Already runnig" if Proc::PID::File->running( dir=>"/tmp/", name => basename("$0",".pl") );
+# Only one instance can run (PID file in /tmp)
+die "Already running" if Proc::PID::File->running( dir=>"/tmp/", name => basename("$0",".pl") );
 
 my %Config;
 Config::Simple->import_from('/etc/sipban.conf', \%Config) or die Config::Simple->error();
 
-# Defaults of the parameters added in version 1.1.0, older files still work
+# Defaults for the parameters added in version 1.1.0, so older configuration
+# files keep working
 $Config{'flood.count'}        = 5    unless (defined($Config{'flood.count'}));
 $Config{'flood.interval'}     = 60   unless (defined($Config{'flood.interval'}));
 $Config{'flood.grace'}        = 5    unless (defined($Config{'flood.grace'}));
@@ -70,22 +72,22 @@ $Config{'trust.max_failures'} = 30   unless (defined($Config{'trust.max_failures
 $Config{'trust.interval'}     = 60   unless (defined($Config{'trust.interval'}));
 
 #--------------------#
-# Control Parameters #
+# Global state       #
 #--------------------#
 
-# Timers Info
+# Timers
 my $Start_Time = time();
 my $Ping_Time  = $Start_Time + $Config{'ami.ping'};
-# 9999-12-31 23:59:59 UTC this epoch could be higher, but is a nice date
+# 9999-12-31 23:59:59 UTC, used when no block is waiting to expire
 my $max_epoch = 253402300799;
 my $min_epoch = $max_epoch;
 
-# Socket handlers
+# Sockets
 my $asterisk_handler;
 my $asterisk_select;
 my $asterisk_client;
 
-# signal traps
+# Stop cleanly (see Terminate) on INT, TERM and HUP
 $SIG{PIPE} = 'IGNORE';
 $SIG{INT} = $SIG{TERM} = $SIG{HUP} = 'Terminate';
 
@@ -95,59 +97,59 @@ my $ips = "$Config{'ipset.path'}" . 'ipset';       # ipset command
 # INPUT rule that applies the set: -i eno1 -m set --match-set sipban src -j DROP
 my $ipt_rule = "-i $Config{'iptables.interface'} -m set --match-set $Config{'ipset.set_name'} src -j $Config{'iptables.rule'}";
 
-# Open Socket connection to accept clients requests
+# Control console: listening socket for the telnet clients
 my $server = IO::Socket::INET->new(LocalPort => "$Config{'control.port'}",
                              LocalAddr => "$Config{'control.address'}",
                              Listen    => 10,
                              ReuseAddr => 1,
                              Blocking  => 0,
-) or die "Can't make server socket: $@\n";
+) or die "Can't create the control socket: $@\n";
 
 $server->blocking(0);
 
 my $select = IO::Select->new($server);
 
-# begin with empty buffers
+# Input and output buffers of each socket
 my %in_buffer     = ();
 my %out_buffer    = ();
 
 my %sessions     = ();
 my %ban_ip       = ();
 my %white_list   = ();
-my %partial_in   = ();   # incomplete line of each socket, waits the next read
+my %partial_in   = ();   # incomplete line of each socket, completed by the next read
 
-# Trusted ip's are not blocked by the security events (see Security_Failure)
-my %registered_ip = ();  # ip's with a registered PJSIP contact
-my %contacts_next = ();  # contact list in course (PJSIPShowContacts)
-my %trusted_ip    = ();  # ip => epoch, trusted after a successful auth
-my %pending_auth  = ();  # "ip|session" => [ip, epoch], challenge without answer
-my %log_once      = ();  # last time of repetitive log lines
+# Trusted IPs are not blocked by the security events (see Security_Failure)
+my %registered_ip = ();  # IPs with a registered PJSIP contact
+my %contacts_next = ();  # contact list being received (PJSIPShowContacts)
+my %trusted_ip    = ();  # ip => epoch until it is trusted (SuccessfulAuth)
+my %pending_auth  = ();  # "ip|session" => [ip, epoch] of each challenge waiting for an answer
+my %log_once      = ();  # key => epoch when that log line was last written
 my $contacts_supported = 1;
 my $Contacts_Time      = 0;
 my $Housekeeping_Time  = $Start_Time + 60;
 
-# Services monitored in the security events
+# Services whose security events are processed
 my %Services = map { $_ => 1 } qw(PJSIP SIP IAX IAX2 AMI);
 
 tie %in_buffer, 'Tie::RefHash';
 my $event_str = "";
 
-# Flags to connect to Asterisk
+# AMI connection: while the flag is 1, the main loop tries to connect
 my $manager_connect_time = 0;
 my $manager_connect_flag = 1;
 
 # Help
 my $HELP = "\nCommands:\n\n";
-$HELP .= "block                => List blocked ip address\n";
-$HELP .= "block {ip address}   => block ip address\n";
-$HELP .= "unblock \[ip address\] => unblock ip address\n";
-$HELP .= "save                 => Dump the blocked IP's\n";
-$HELP .= "restore              => If exists a dump file restore the rules from it\n";
-$HELP .= "uptime               => show the program uptime\n";
-$HELP .= "whois                => show the WHOIS info of a given ip\n";
-$HELP .= "wl                   => show white list ip address\n";
-$HELP .= "trusted              => show trusted ip address (registered or authenticated)\n";
-$HELP .= "exit/quit            => exit console session\n";
+$HELP .= "block                => list the blocked IP addresses\n";
+$HELP .= "block {ip address}   => block an IP address\n";
+$HELP .= "unblock {ip address} => unblock an IP address\n";
+$HELP .= "save                 => save the blocked IP addresses to the dump file\n";
+$HELP .= "restore              => restore the blocked IP addresses from the dump file\n";
+$HELP .= "uptime               => show how long sipban has been running\n";
+$HELP .= "whois {ip address}   => show the WHOIS information of an IP address\n";
+$HELP .= "wl                   => show the whitelist\n";
+$HELP .= "trusted              => show the trusted IP addresses (registered or authenticated)\n";
+$HELP .= "exit/quit            => close the console session\n";
 
 my $LICENSE  = "SIPban  Copyright (C) 2019-2024 Fernando 'El Pop' Romo\n\n";
 $LICENSE .= "This program comes with ABSOLUTELY NO WARRANTY;\n";
@@ -155,14 +157,14 @@ $LICENSE .= "for details https://www.gnu.org/licenses/gpl-3.0.en.html\n";
 $LICENSE .= "This is free software, and you are welcome to redistribute\n";
 $LICENSE .= "it under certain conditions.";
 
-# RegExp to validate a valid ip/class address
+# An IPv4 address with an optional class (CIDR prefix), e.g. 192.0.2.0/24
 my $IPv4 ='^((25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.]' .
            '(25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.]' .
            '(25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.]' .
            '(25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))' .
            '(\/(3[0-2]|[1-2][0-9]|[0-9]))?$';
 
-# open log file
+# Log file
 open(LOG, ">> $Config{'log.file'}") or die;
 LOG->autoflush(1);
 
@@ -184,26 +186,26 @@ sub Ipset_Exists_Set {
 }
 
 sub Ipset_Create_Set {
-    # /usr/sbin/ipset create sippban hash:ip hashsize 4096 timeout 604800
+    # /usr/sbin/ipset create sipban hash:net hashsize 4096 timeout 604800
     my $rv = qx($ips create $Config{'ipset.set_name'} hash:net hashsize 4096 timeout $Config{'ipset.timeout'});
     print LOG Time_Stamp() . " IPSET => set $Config{'ipset.set_name'} created\n";
 }
 
 sub Ipset_Destroy_Set {
-    # /usr/sbin/ipset destroy sippban
+    # /usr/sbin/ipset destroy sipban
     my $rv = qx($ips destroy $Config{'ipset.set_name'});
     print LOG Time_Stamp() . " IPSET => set $Config{'ipset.set_name'} destroyed\n";
 }
 
 sub Ipset_Save {
-    # /usr/sbin/ipset save > /etc/sippban.dump
+    # /usr/sbin/ipset save sipban > /etc/sipban.dump
     my $rv = qx($ips save $Config{'ipset.set_name'} > $Config{'ipset.dump'});
     print LOG Time_Stamp() . " IPSET => set $Config{'ipset.set_name'} saved\n";
 }
 
 sub Ipset_Restore_Set {
     if (-e $Config{'ipset.dump'}) {
-        # /usr/sbin/ipset restore -! < /$SAVE_FILE/etc/sippban.dump
+        # /usr/sbin/ipset restore -! < /etc/sipban.dump
         my $rv = qx($ips restore -! < $Config{'ipset.dump'});
         print LOG Time_Stamp() . " IPSET => set $Config{'ipset.set_name'} restored\n";
     }
@@ -214,19 +216,19 @@ sub Ipset_Block {
     if ($min_epoch > $ban_ip{$ip}) {
         $min_epoch = $ban_ip{$ip};
     }
-    # /usr/sbin/ipset -q add sippban $ip > /dev/null
+    # /usr/sbin/ipset -q add sipban 192.0.2.10
     my $rv = qx($ips -q add $Config{'ipset.set_name'} $ip);
     print LOG Time_Stamp() . " BLOCK => $ip ($msg)\n";
 }
 
 sub Ipset_Unblock {
     my ($ip, $msg) = @_;
-    # /usr/sbin/ipset -q del sippban $ip > /dev/null
+    # /usr/sbin/ipset -q del sipban 192.0.2.10
     my $rv = qx($ips -q del $Config{'ipset.set_name'} $ip);
     print LOG Time_Stamp() . " UNBLOCK => $ip ($msg)\n";
 }
 
-# Block an ip/class address unless is already blocked or in the white list
+# Block an IP address or class, unless it is already blocked or whitelisted
 sub Ban_IP {
     my ($ip, $msg) = @_;
     return 0 unless ($ip =~ /$IPv4/);
@@ -236,7 +238,8 @@ sub Ban_IP {
     return 1;
 }
 
-# The white list wins over previous blocks (dump file or a running set)
+# Whitelisted addresses take precedence over earlier blocks (from the dump
+# file, or from a set that was still loaded)
 sub Ipset_Purge_White_List {
     foreach my $ip (sort keys %ban_ip) {
         if (In_White_List($ip)) {
@@ -246,9 +249,10 @@ sub Ipset_Purge_White_List {
     }
 }
 
+# Rebuild %ban_ip from the members of the set and their remaining time
 sub Ipset_Load_Ban_IP {
     %ban_ip = ();
-    # /usr/sbin/ipset restore -! < /$SAVE_FILE/etc/sippban.dump
+    # /usr/sbin/ipset list sipban (one "<ip> timeout <seconds>" line per member)
     my @rv = qx($ips list $Config{'ipset.set_name'});
     my $now = time();
     foreach my $line (@rv) {
@@ -263,6 +267,8 @@ sub Ipset_Load_Ban_IP {
     }
 }
 
+# The set removes the expired members by itself; this keeps %ban_ip in sync
+# and finds the next expiration
 sub Ipset_Prune_Block {
     my $time = shift;
     foreach my $ip (sort keys %ban_ip) {
@@ -300,8 +306,9 @@ sub Iptables_Create_Rule {
 
 sub Iptables_Erase_Rule {
     # /sbin/iptables -t filter -D INPUT -i eno1 -m set --match-set sipban src -j DROP
-    # deletes every copy: older versions inserted it again after a crash, and
-    # the set cannot be destroyed while a rule uses it
+    # Delete every copy: before version 1.1.0 an unclean stop left the rule in
+    # place and the next start inserted it again, and the set cannot be
+    # destroyed while a rule still uses it
     my $copies = 0;
     while (Iptables_Exists_Rule() && $copies < 100) {
         my $rv = qx($ipt -t filter -D INPUT $ipt_rule);
@@ -314,6 +321,7 @@ sub Iptables_Erase_Rule {
 # Asterisk functions #
 #--------------------#
 
+# Returns the new value of $manager_connect_flag: 0 connected, 1 failed
 sub Connect_To_Asterisk {
     my $host = shift;
     $asterisk_handler = new IO::Socket::INET->new( PeerAddr  => "$host",
@@ -332,6 +340,8 @@ sub Connect_To_Asterisk {
     }
 }
 
+# Queue an AMI action; the main loop sends it when the socket is writable.
+# Nothing is queued while disconnected.
 sub Send_To_Asterisk {
     my $command_ref = shift;
     if ($$command_ref ne '' && $manager_connect_flag == 0) {
@@ -339,6 +349,8 @@ sub Send_To_Asterisk {
     }
 }
 
+# "Events: on" receives every event allowed by the read permission of the AMI
+# user (read = security in the sample manager.conf)
 sub Manager_Login {
     my $command  = "Action: login\r\n";
     $command .= "Username: $Config{'ami.user'}\r\n";
@@ -347,7 +359,8 @@ sub Manager_Login {
     Send_To_Asterisk(\$command);
 }
 
-# The answer comes as ContactList events, see %AMI_Handler
+# Asterisk answers with one ContactList event per contact and a final
+# ContactListComplete event (see %AMI_Handler)
 sub Request_Contacts {
     %contacts_next = ();
     Send_To_Asterisk(\"Action: PJSIPShowContacts\r\nActionID: sipban-contacts\r\n\r\n");
@@ -357,9 +370,9 @@ sub Request_Contacts {
 # Trust functions #
 #-----------------#
 
-# An ip is trusted if has a registered PJSIP contact or a recent successful
-# authentication. Phones behind the same NAT share the ip, one of them with
-# a bad account or password must not block the others.
+# An IP is trusted if it has a registered PJSIP contact or a recent successful
+# authentication. Phones behind the same NAT share the IP, so one phone with a
+# wrong account or password must not block the others.
 sub Is_Trusted {
     my $ip = shift;
     return 1 if (exists($registered_ip{$ip}));
@@ -367,13 +380,15 @@ sub Is_Trusted {
     return 0;
 }
 
+# Common fields of the security events
 sub Parse_Security_Event {
     my $packet_content_ref = shift;
     my ($service)    = $$packet_content_ref =~ /\nService\:\s(.*?)\n/i;
     my ($account_id) = $$packet_content_ref =~ /\nAccountID\:\s(.*?)\n/i;
     my ($session_id) = $$packet_content_ref =~ /\nSessionID\:\s(.*?)\n/i;
     my ($remote_ip)  = $$packet_content_ref =~ /\nRemoteAddress\:\sIPV4\/[^\/]*\/([^\/]*)\//i;
-    # the account comes from the SIP request, only to log it
+    # AccountID comes from the SIP request, so the sender controls it: it is
+    # only logged, with a length limit and without non-printable characters
     $account_id = substr($account_id, 0, 64);
     $account_id =~ s/[^[:print:]]/?/g;
     return ($service, $account_id, $session_id, $remote_ip);
@@ -381,9 +396,10 @@ sub Parse_Security_Event {
 
 #---------------------------------------------------------------------#
 # InvalidAccountID, InvalidPassword, ChallengeResponseFailed and      #
-# FailedACL block the remote ip, unless is trusted. A trusted ip is   #
-# blocked only with "trust.max_failures" events in "trust.interval"   #
-# seconds: a phone with a bad account retries slow, brute force don't #
+# FailedACL block the remote IP unless it is trusted. A trusted IP is #
+# only blocked after "trust.max_failures" failures within             #
+# "trust.interval" seconds: a phone with a wrong account retries      #
+# slowly, a brute force attack does not.                              #
 #---------------------------------------------------------------------#
 sub Security_Failure {
     my ($packet_content_ref, $reason) = @_;
@@ -394,10 +410,10 @@ sub Security_Failure {
     if (Is_Trusted($remote_ip)) {
         my $count = Count_Event("failure $remote_ip", $Config{'trust.interval'});
         if ($count >= $Config{'trust.max_failures'}) {
-            Ban_IP($remote_ip, "$msg, $count failures from trusted ip");
+            Ban_IP($remote_ip, "$msg, $count failures from a trusted IP");
         }
         else {
-            Log_Once("$remote_ip $msg", "IGNORE => $remote_ip ($msg) trusted ip");
+            Log_Once("$remote_ip $msg", "IGNORE => $remote_ip ($msg) trusted IP");
         }
         return;
     }
@@ -405,9 +421,11 @@ sub Security_Failure {
 }
 
 #---------------------------------------------------------------------#
-# A challenge (401/407) without SuccessfulAuth in "flood.grace"       #
-# seconds is unanswered. Phones answer the challenges, scanners       #
-# don't: block with "flood.count" unanswered in "flood.interval" secs #
+# A challenge (401/407) is unanswered if no SuccessfulAuth of the     #
+# same session arrives within "flood.grace" seconds. Phones answer    #
+# their challenges and scanners usually do not, so an IP is blocked   #
+# after "flood.count" unanswered challenges within "flood.interval"   #
+# seconds.                                                            #
 #---------------------------------------------------------------------#
 sub Check_Pending_Auth {
     my $now = shift;
@@ -423,7 +441,7 @@ sub Check_Pending_Auth {
     }
 }
 
-# Forget expired trusted ip's and old log keys
+# Forget the expired trusted IPs and the old Log_Once() keys
 sub Housekeeping {
     my $now = shift;
     foreach my $ip (keys %trusted_ip) {
@@ -448,6 +466,7 @@ sub Trim {
     return wantarray ? @out : $out[0];
 }
 
+# Extract an IP address or class from a text; returns it and whether it is valid
 sub Get_IP {
     my $address = shift;
     $address = Trim($address);
@@ -468,7 +487,7 @@ sub IP_To_Int {
     return ($octet[0] << 24) + ($octet[1] << 16) + ($octet[2] << 8) + $octet[3];
 }
 
-# True if two ip/class addresses share at least one address
+# True if two IP addresses or classes share at least one address
 sub CIDR_Overlap {
     my ($first, $second) = @_;
     my ($first_ip, $first_net)   = split(/\//, $first);
@@ -480,6 +499,7 @@ sub CIDR_Overlap {
     return ((IP_To_Int($first_ip) & $mask) == (IP_To_Int($second_ip) & $mask));
 }
 
+# True if the address overlaps any whitelist entry
 sub In_White_List {
     my $ip = shift;
     foreach my $address (keys %white_list) {
@@ -516,8 +536,8 @@ sub Convert_To_Time {
     return $result;
 }
 
-# Count the events of a key in a window of $interval seconds, the window
-# begins with the first event
+# Count the events of a key in a fixed window of $interval seconds that starts
+# with the first event. The counters are kept in %cache (at most 1000 keys).
 sub Count_Event {
     my ($key, $interval) = @_;
     my $now = time();
@@ -530,7 +550,7 @@ sub Count_Event {
     return 1;
 }
 
-# Write a log line only once per hour for the same key
+# Write a log line at most once per hour for the same key
 sub Log_Once {
     my ($key, $line) = @_;
     my $now = time();
@@ -545,21 +565,20 @@ sub Terminate {
     Ipset_Destroy_Set();
 
     my $client;
-    # Clean up connections
+    # Close the console sessions
     foreach $client (keys %sessions) {
         $select->remove($client);
         close($client);
     }
-    close($server);                   # destroy socket handler
-    close($asterisk_handler);         # destroy asterisk manager conection
+    close($server);                   # close the control socket
+    close($asterisk_handler);         # close the AMI connection
     print LOG Time_Stamp() . " SipBan Stop\n";
     close(LOG);
     exit(0);                          # Exit without error
 }
 
 #----------------------------------------------------------------------------------------------
-# [Developer Note]: the process of each client request is declared in the %Client_Handler
-#                   Hash and use references for speed operations in the event detection cycle.
+# Console commands: %Client_Handler maps each command to the code that runs it.
 #----------------------------------------------------------------------------------------------
 my %Client_Handler = (
     "block" => sub {
@@ -570,18 +589,18 @@ my %Client_Handler = (
             my ($ip, $valid) = Get_IP($control->[1]);
             if ($valid) {
                 if (exists($ban_ip{$ip})) {
-                    $out_buffer{$client} .= "$ip previously blocked\n";
+                    $out_buffer{$client} .= "$ip is already blocked\n";
                 }
                 elsif (In_White_List($ip)) {
-                    $out_buffer{$client} .= "$ip is in the white list\n";
+                    $out_buffer{$client} .= "$ip is whitelisted\n";
                 }
                 else {
                     Ban_IP($ip, 'Manual block');
-                    $out_buffer{$client} .= "$ip block\n";
+                    $out_buffer{$client} .= "$ip blocked\n";
                 }
             }
             else {
-                $out_buffer{$client} .= "$ip don't seems like a valid address\n";
+                $out_buffer{$client} .= "$ip is not a valid IP address\n";
             }
         }
         else {
@@ -607,15 +626,15 @@ my %Client_Handler = (
                     $out_buffer{$client} .= "$ip unblocked\n";
                 }
                 else {
-                    $out_buffer{$client} .= "$ip is not previously blocked\n";
+                    $out_buffer{$client} .= "$ip is not blocked\n";
                 }
             }
             else {
-                $out_buffer{$client} .= "$ip don't seems like a valid address\n";
+                $out_buffer{$client} .= "$ip is not a valid IP address\n";
             }
         }
         else {
-            $out_buffer{$client} .= "ip address missing\n";
+            $out_buffer{$client} .= "Missing IP address\n";
         }
     },
     "save" => sub {
@@ -628,7 +647,7 @@ my %Client_Handler = (
         Ipset_Restore_Set($client);
         Ipset_Load_Ban_IP();
         Ipset_Purge_White_List();
-        $out_buffer{$client} .= "ipset $Config{'ipset.set_name'} restore\n";
+        $out_buffer{$client} .= "ipset $Config{'ipset.set_name'} restored\n";
     },
     "help" => sub {
         my $client = shift;
@@ -654,15 +673,15 @@ my %Client_Handler = (
                     }
                 }
                 else {
-                    $out_buffer{$client} .=  "No response from WHOIS servers\n";
+                    $out_buffer{$client} .=  "No response from the WHOIS servers\n";
                 }
             }
             else {
-                $out_buffer{$client} .= "$ip don't seems like a valid address\n";
+                $out_buffer{$client} .= "$ip is not a valid IP address\n";
             }
         }
         else {
-            $out_buffer{$client} .= "ip address missing\n";
+            $out_buffer{$client} .= "Missing IP address\n";
         }
     },
     "wl" => sub {
@@ -681,7 +700,7 @@ my %Client_Handler = (
         }
         foreach my $ip (sort { $trusted_ip{$a} <=> $trusted_ip{$b} } keys %trusted_ip) {
             next if ($trusted_ip{$ip} <= $now);
-            $out_buffer{$client} .= Time_Stamp($trusted_ip{$ip}) . " $ip (successful auth)\n";
+            $out_buffer{$client} .= Time_Stamp($trusted_ip{$ip}) . " $ip (successful authentication)\n";
         }
     },
     "quit" => sub {
@@ -695,13 +714,9 @@ my %Client_Handler = (
     },
 );
 #----------------------------------------------------------------
-# [Pop] Developer Note: I declare the "exit" command Out of the
-# initial %Client_Handler Hash declaration to avoid perl compiler
-# errors because i try to invoque a non declare hash into the
-# same hash :P
-#
-# The trick is receive the "exit" command and call the same
-# rutine of the "quit" event.
+# "exit" is an alias of "quit". It is added after the declaration
+# because a "my" variable is not visible inside its own
+# initialization, so the code there cannot use %Client_Handler.
 #----------------------------------------------------------------
 $Client_Handler{exit} = (sub {
     my $client = shift;
@@ -709,9 +724,8 @@ $Client_Handler{exit} = (sub {
 });
 
 #--------------------------------------------------------------------------------------
-# [Developer Note]: the process of each packet comming from the asteris manager (AMI),
-#                   is declared in the %AMI_Handler Hash and use references for
-#                   speed operations in the event detection cycle.
+# AMI packets: %AMI_Handler maps the packet type (Event, Response) and its name to the
+# code that processes it.
 #--------------------------------------------------------------------------------------
 my %AMI_Handler = (
     "Event" => {
@@ -749,7 +763,7 @@ my %AMI_Handler = (
             Security_Failure(shift, 'Invalid Password');
         },
         #-----------------------------
-        # PJSIP reports a bad password with this event, not InvalidPassword
+        # PJSIP reports a wrong password with this event; it never sends InvalidPassword
         #
         # Event: ChallengeResponseFailed
         # Privilege: security,all
@@ -799,7 +813,7 @@ my %AMI_Handler = (
             my ($service, $account_id, $session_id, $remote_ip) = Parse_Security_Event(shift);
             return unless (exists($Services{$service}) && $remote_ip =~ /$IPv4/);
             return if (Is_Trusted($remote_ip) || exists($ban_ip{$remote_ip}));
-            # wait the SuccessfulAuth of the same session (Check_Pending_Auth)
+            # wait for the SuccessfulAuth of the same session (see Check_Pending_Auth)
             my $key = "$remote_ip|$session_id";
             $pending_auth{$key} = [ $remote_ip, time() ] unless (exists($pending_auth{$key}));
         },
@@ -828,7 +842,7 @@ my %AMI_Handler = (
             $trusted_ip{$remote_ip} = time() + $Config{'trust.ttl'};
         },
         #-----------------------------
-        # Answer of PJSIPShowContacts, one event per contact
+        # Response to PJSIPShowContacts, one event per contact
         #
         # Event: ContactList
         # ActionID: sipban-contacts
@@ -843,20 +857,22 @@ my %AMI_Handler = (
             my $packet_content_ref = shift;
             my ($uri) = $$packet_content_ref =~ /\nUri\:\s(.*?)\n/i;
             my ($via) = $$packet_content_ref =~ /\nViaAddr\:\s(.*?)\n/i;
-            # with NAT the contact needs "rewrite_contact=yes" to have the
-            # public ip of the phone
+            # Behind NAT, the URI has the public IP of the phone only if the
+            # endpoint has rewrite_contact=yes. ViaAddr is the sent-by address
+            # of the Via header that the phone added to its REGISTER.
             my ($host) = $uri =~ /^sips?\:(?:[^\@]*\@)?([^\:\;\>]+)/i;
             foreach my $ip ($host, $via) {
                 $contacts_next{$ip} = 1 if (defined($ip) && $ip =~ /$IPv4/);
             }
         },
+        # End of the list: it replaces the previous one
         "ContactListComplete" => sub {
             my $before = keys %registered_ip;
             %registered_ip = %contacts_next;
             %contacts_next = ();
             my $after = keys %registered_ip;
             if ($before != $after) {
-                print LOG Time_Stamp() . " CONTACTS => $after ip's with registered PJSIP contacts\n";
+                print LOG Time_Stamp() . " CONTACTS => $after IPs with registered PJSIP contacts\n";
             }
         },
     }, # Event
@@ -878,9 +894,9 @@ my %AMI_Handler = (
                     %contacts_next = ();
                 }
                 else {
-                    # older Asterisk or AMI user without "system" write permission
+                    # e.g. the AMI user lacks the "system" write permission
                     $contacts_supported = 0;
-                    print LOG Time_Stamp() . " CONTACTS => PJSIPShowContacts failed ($message), only SuccessfulAuth trust ip's\n";
+                    print LOG Time_Stamp() . " CONTACTS => PJSIPShowContacts failed ($message); only SuccessfulAuth events will trust IPs\n";
                 }
             }
             else {
@@ -893,15 +909,15 @@ my %AMI_Handler = (
 #---------------------------------------------------------#
 #  Function: Handle_Clients([Client TCP handler])         #
 #---------------------------------------------------------#
-# Objetive: Take the requests of client programs and      #
-#           interface with Asterisk manager               #
+# Objective: Run the console commands received from a     #
+#            client                                       #
 #   Params: [client TCP handler]                          #
 #    Usage:                                               #
 #          Handle_Clients($client);                       #
 #---------------------------------------------------------#
 sub Handle_Clients {
-    # requests are in $in_buffer{$client}
-    # send output to $out_buffer{$client}
+    # the commands are in $in_buffer{$client}, the answers go to
+    # $out_buffer{$client}
     my $client = shift;
     my $request;
 
@@ -926,17 +942,16 @@ sub Handle_Clients {
 }
 
 #---------------------------------------------------------#
-#  Function: Handle_Events([Asterisk TCP handler])        #
+#  Function: Handle_AMI([Asterisk TCP handler])           #
 #---------------------------------------------------------#
-# Objetive: Take the requests of Asterisk and manipulate  #
-#           the asterisk Manager events.                  #
+# Objective: Split the data received from the AMI into    #
+#            packets and run the handler of each one      #
 #   Params: [Asterisk TCP handler]                        #
 #    Usage:                                               #
-#          Handle_Events($asterisk_handler);              #
+#          Handle_AMI($asterisk_handler);                 #
 #---------------------------------------------------------#
 sub Handle_AMI {
-    # requests are in $ready{$client}
-    # send output to $out_buffer{$client}
+    # the received lines are in $in_buffer{$client}
     my $client = shift;
     my $request;
     my @packet = ();
@@ -945,12 +960,12 @@ sub Handle_AMI {
         $event_str .= $request if ($request);
     }
     if ($event_str =~ /\r\n\r\n/) {
-       # put each packet in separate area
+       # a packet ends with an empty line
        @packet = $event_str =~ /(?:Action|Event|Message|Response).*?\r\n\r\n/isxg;
        # process each individual packet
        foreach my $packet_content (@packet) {
            $packet_content =~ s/\r//g;
-           # Analyze each packet header and process according
+           # the first line has the type and the name, e.g. "Event: ChallengeSent"
            my ($ami_action, $event) = $packet_content =~ /^(.*?):\s(.*?)\n/isx;
            # $event = lc($event);
            if (exists($AMI_Handler{$ami_action}{$event})) {
@@ -958,7 +973,7 @@ sub Handle_AMI {
 	       #    print "----- AMI -----\n$packet_content\n";
            }
        }
-       # if exists a remainder incomplet event, keep it to the next round
+       # keep an incomplete packet for the next read
        my $last_pos = rindex($event_str,"\r\n\r\n");
        $last_pos = $last_pos + 4;
        my $len = length($event_str);
@@ -975,13 +990,13 @@ sub Handle_AMI {
 sub Clean_Connection {
     my $client = shift;
 
-    # Delete working buffers
+    # Delete the buffers of the connection
     delete $in_buffer{$client};
     delete $out_buffer{$client};
     delete $partial_in{$client};
     delete $sessions{$client};
 
-    # Check if the connection to Asterisk Die and turn the reconnection Flag
+    # If the AMI connection was lost, the main loop connects again
     if ($client eq $asterisk_handler) {
     	$manager_connect_flag =1;
         $event_str = '';
@@ -995,10 +1010,10 @@ sub Clean_Connection {
 #      Main block      #
 #======================#
 
-# Load white list from file to hash %white_list
+# Load the whitelist
 if (-e $Config{'iptables.white_list'}) {
-    open WL, "< $Config{'iptables.white_list'}" || die "Can\'t open file\n";
-    while(<WL>) { # Read records
+    open WL, "< $Config{'iptables.white_list'}" || die "Can\'t open the whitelist\n";
+    while(<WL>) { # one address per line
         chomp;
         my ($ip, $valid) = Get_IP($_);
         if ($valid) {
@@ -1009,7 +1024,9 @@ if (-e $Config{'iptables.white_list'}) {
     close (WL);
 }
 
-# Check if exists Ipset set
+# Load the blocked IPs. If the set still exists (unclean stop), the dump file
+# is merged into it; otherwise the set is restored from the dump file, or
+# created empty.
 if ( Ipset_Exists_Set() ) {
     Ipset_Restore_Set();
     Ipset_Load_Ban_IP();
@@ -1031,7 +1048,7 @@ unless (Iptables_Exists_Rule()) {
     Iptables_Create_Rule();
 }
 
-# Main Cycle
+# Main loop
 
 while (1) { # Main loop #
     my $client;
@@ -1041,12 +1058,11 @@ while (1) { # Main loop #
         $manager_connect_flag = Connect_To_Asterisk("$Config{'ami.host'}");
         unless ($manager_connect_flag) {
             Manager_Login();
-            $Contacts_Time = 0;   # ask the contacts right after the login
+            $Contacts_Time = 0;   # request the contacts right after login
         }
     }
 
-    # check for new information on the connections we have.
-    # anything to read or accept?
+    # Read the sockets that have data and accept new console clients
     foreach $client ($select->can_read(1)) {
         if ($client == $server) {
             # accept a new connection
@@ -1054,34 +1070,31 @@ while (1) { # Main loop #
             $client->blocking(0);
             $select->add($client);
             $sessions{$client} = 1;
-            $out_buffer{$client} = "\n$LICENSE\n\nuse 'help' for more commands\nsipban>";
+            $out_buffer{$client} = "\n$LICENSE\n\nType 'help' to list the commands\nsipban>";
         }
         else {
             # read data
             $data = '';
             eval { $rv   = $client->recv($data, POSIX::BUFSIZ, 0) };
             unless (defined($rv) && length $data) {
-                # This would be the end of file, so close the client
+                # no data: the other side closed the connection
                 Clean_Connection($client);
                 next;
             }
             $data =~ s/\0/\r\n/g;
-            # a read can end in the middle of a line, the remainder of the
-            # previous read goes first
+            # a read can end in the middle of a line: prepend the rest of the
+            # previous read
             $data = $partial_in{$client} . $data if (exists($partial_in{$client}));
-            # test whether the data in the buffer or the data we
-            # just read means there is a complete request waiting
-            # to be fulfilled.  If there is, set $inbuffer{$client}
-            # to the requests waiting to be fulfilled.
+            # move the complete lines to $in_buffer{$client}
             while ($data =~ s/(.*\r\n)//) {
                 push( @{$in_buffer{$client}}, $1 );
             }
-            # keep the incomplete line (limited, in case of garbage)
+            # keep the incomplete line for the next read (at most 64 KB)
             $partial_in{$client} = (length($data) < 65536) ? $data : '';
         }
     }
 
-    # Any complete requests to process?
+    # Process the complete lines
     foreach $client (keys %in_buffer) {
         if ($client eq $asterisk_handler) {
             Handle_AMI($client);
@@ -1091,37 +1104,39 @@ while (1) { # Main loop #
         }
     }
 
-    # Timer operations
+    # Timers
     my $current_time = time();
+    # keep the AMI connection alive
     if ($current_time >= $Ping_Time) {
         $Ping_Time += $Config{'ami.ping'};
         # print LOG Time_Stamp() . " Ping\n";
         Send_To_Asterisk(\"Action: Ping\r\n\r\n");
     }
-    # Clean on block time lapse
+    # expired blocks
     if ($current_time >= $min_epoch) {
         Ipset_Prune_Block($current_time);
     }
-    # Challenges without answer
+    # unanswered challenges
     Check_Pending_Auth($current_time);
-    # Refresh the ip's with registered PJSIP contacts
+    # refresh the IPs with registered PJSIP contacts
     if ($contacts_supported && $Config{'trust.refresh'} > 0 && $current_time >= $Contacts_Time) {
         $Contacts_Time = $current_time + $Config{'trust.refresh'};
         Request_Contacts();
     }
+    # once a minute
     if ($current_time >= $Housekeeping_Time) {
         $Housekeeping_Time = $current_time + 60;
         Housekeeping($current_time);
     }
 
-    # Buffers to flush?
+    # Send the pending output
     foreach $client ($select->can_write(1)) {
-        # Skip this client if we have nothing to say
+        # nothing to send to this socket
         next unless exists $out_buffer{$client};
-        # Check if the socket exists before send
+        # defensive check: can_write() only returns socket objects
         ## if (defined(getpeername($client))) {
         unless($client eq "") {
-            # use eval to isolate the send command in case of failure and continue the main process
+            # eval: a failed send must not stop the main loop
             eval { $rv = $client->send($out_buffer{$client}, 0) };
             unless (defined $rv) {
                 # Whine, but move on.
@@ -1142,9 +1157,8 @@ while (1) { # Main loop #
 	    }
     }
 
-    # Out of band data?
-    foreach $client ($select->has_exception(0)) {  # arg is timeout
-        # Deal with out-of-band data here, if you want to.
+    # Out-of-band data is not used
+    foreach $client ($select->has_exception(0)) {  # the argument is the timeout
     }
 } # End of main loop
 

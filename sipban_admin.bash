@@ -1,17 +1,19 @@
 #!/bin/bash
 #
-# Use this iptables rules to use the script:
+# Wrapper for common ipset commands on the sipban set. It does not check the
+# whitelist. The set only blocks traffic while this iptables rule exists
+# (sipban.pl inserts it at startup):
 #
 # /sbin/iptables -t filter -I INPUT -i eno1 -m set --match-set sipban src -j DROP
 
-# Your ipset data set name
+# Name of the ipset set
 IPSET_NAME="sipban"
 SAVE_FILE="/etc/sipban.dump"
 TIMEOUT=604800
 IPv4="^((25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))(\/(3[0-2]|[1-2][0-9]|[0-9]))?$"
 
 case $1 in
-    # create set
+    # Create the set
     -c)
         /usr/sbin/ipset create $IPSET_NAME hash:net hashsize 4096 timeout $TIMEOUT > /dev/null
     ;;
@@ -19,31 +21,31 @@ case $1 in
     -f)
         /usr/sbin/ipset flush $IPSET_NAME
     ;;
-    # Kill (Destroy) the set
+    # Destroy the set
     -k)
         /usr/sbin/ipset destroy $IPSET_NAME
     ;;
-    # info of the set
+    # Show the header of the set
     -i)
         /usr/sbin/ipset list $IPSET_NAME -t
     ;;
-    # add ip to set
+    # Add an IP address or class to the set
     -a)
         if [[ $2  =~ $IPv4 ]]; then
             /usr/sbin/ipset -q add $IPSET_NAME $2 > /dev/null
         else
-            echo 'Invalid ip address'
+            echo 'Invalid IP address'
         fi
     ;;
-    # Delete ip from set
+    # Delete an IP address from the set
     -d)
         if [[ $2  =~ $IPv4 ]]; then
             /usr/sbin/ipset del $IPSET_NAME $2
         else
-            echo 'Invalid ip address'
+            echo 'Invalid IP address'
         fi
     ;;
-    # list ip's on set
+    # List the members, or test whether an IP address is in the set
     -l)
         if  [[ $2  =~ $IPv4 ]]; then
             /usr/sbin/ipset test $IPSET_NAME $2
@@ -51,15 +53,15 @@ case $1 in
             /usr/sbin/ipset list $IPSET_NAME
         fi
     ;;
-    # Save set to file
+    # Save the set to the dump file
     -s)
         /usr/sbin/ipset save $IPSET_NAME > $SAVE_FILE
     ;;
-    # Restore set from file
+    # Restore the set from the dump file
     -r)
         /usr/sbin/ipset restore -! < $SAVE_FILE
     ;;
-    # Upload ip's from given file
+    # Add the IP addresses listed in a file
     -u)
         if test -f $2; then
             while IFS= read -r line;
@@ -67,27 +69,27 @@ case $1 in
                     if [[ $line  =~ $IPv4 ]]; then
                         /usr/sbin/ipset -q add $IPSET_NAME $line > /dev/null
                     else
-                        echo 'Invalid ip address'
+                        echo 'Invalid IP address'
                     fi
                 done < $2
         fi
     ;;
-    # show options if not flag
+    # Without a valid option, show the usage
     *)
         echo "Usage: $0 [options]"
         echo 'options:'
-        echo '    -c (create sipban set)'
-        echo '    -f (flush ipset members)'
-        echo '    -k (destroy sipban set)'
-        echo '    -i (info of sipban set)'
+        echo '    -c (create the sipban set)'
+        echo '    -f (delete all the members of the set)'
+        echo '    -k (destroy the sipban set)'
+        echo '    -i (show information about the set)'
         echo
-        echo '    -a [ip] or [ip/class] (add ip or ip/class to sipban set)'
-        echo '    -d [ip] (delete ip from sipban set)'
-        echo '    -l {ip} (list members or test a given ip)'
+        echo '    -a [ip] or [ip/class] (add an IP address or class to the set)'
+        echo '    -d [ip] (delete an IP address from the set)'
+        echo '    -l {ip} (list the members, or test an IP address)'
         echo
-        echo '    -s (save to sipban file)'
-        echo '    -r (restore from sipban file)'
-        echo '    -u [file] (upload from a given file)'
+        echo '    -s (save the set to the dump file)'
+        echo '    -r (restore the set from the dump file)'
+        echo '    -u [file] (add the IP addresses listed in a file)'
         exit 1
     ;;
 esac
