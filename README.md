@@ -316,11 +316,6 @@ options:
     -u [file] (upload from a given file)
 ```
 
-## Docker
-
-Our friend Federico Pereira (lord.basex@gmail.com), make the docker image of SipBan, the instructions are on the README.md on the docker directory.
-
-
 ## To-do
 
    - IPv6 support
