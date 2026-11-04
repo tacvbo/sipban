@@ -1,9 +1,12 @@
 #!/usr/bin/perl
 #======================================================================#
-# Program => sipban.pl (In Perl 5.0)                     version 1.0.1 #
+# Program => sipban.pl (In Perl 5.0)                     version 1.1.0 #
 #======================================================================#
 # Autor => Fernando "El Pop" Romo                   (pop@cofradia.org) #
 # Creation date => 07/jun/2019                                         #
+# Modified => 04/nov/2026 by tacvbo (https://github.com/tacvbo/sipban) #
+#             trusted ip's (PJSIP contacts and successful auth), new   #
+#             PJSIP events and unanswered challenge detection.         #
 #----------------------------------------------------------------------#
 # Info => This program is a server who make a connection with a        #
 #         asterisk server trough the TCP port 5038,take security       #
@@ -57,6 +60,13 @@ die "Already runnig" if Proc::PID::File->running( dir=>"/tmp/", name => basename
 my %Config;
 Config::Simple->import_from('/etc/sipban.conf', \%Config) or die Config::Simple->error();
 
+# Defaults of the parameters added in version 1.1.0, older files still work
+$Config{'flood.grace'}        = 5    unless (defined($Config{'flood.grace'}));
+$Config{'trust.ttl'}          = 3600 unless (defined($Config{'trust.ttl'}));
+$Config{'trust.refresh'}      = 60   unless (defined($Config{'trust.refresh'}));
+$Config{'trust.max_failures'} = 30   unless (defined($Config{'trust.max_failures'}));
+$Config{'trust.interval'}     = 60   unless (defined($Config{'trust.interval'}));
+
 #--------------------#
 # Control Parameters #
 #--------------------#
@@ -101,6 +111,19 @@ my %ban_ip       = ();
 my %white_list   = ();
 my %partial_in   = ();   # incomplete line of each socket, waits the next read
 
+# Trusted ip's are not blocked by the security events (see Security_Failure)
+my %registered_ip = ();  # ip's with a registered PJSIP contact
+my %contacts_next = ();  # contact list in course (PJSIPShowContacts)
+my %trusted_ip    = ();  # ip => epoch, trusted after a successful auth
+my %pending_auth  = ();  # "ip|session" => [ip, epoch], challenge without answer
+my %log_once      = ();  # last time of repetitive log lines
+my $contacts_supported = 1;
+my $Contacts_Time      = 0;
+my $Housekeeping_Time  = $Start_Time + 60;
+
+# Services monitored in the security events
+my %Services = map { $_ => 1 } qw(PJSIP SIP IAX IAX2 AMI);
+
 tie %in_buffer, 'Tie::RefHash';
 my $event_str = "";
 
@@ -118,6 +141,7 @@ $HELP .= "restore              => If exists a dump file restore the rules from i
 $HELP .= "uptime               => show the program uptime\n";
 $HELP .= "whois                => show the WHOIS info of a given ip\n";
 $HELP .= "wl                   => show white list ip address\n";
+$HELP .= "trusted              => show trusted ip address (registered or authenticated)\n";
 $HELP .= "exit/quit            => exit console session\n";
 
 my $LICENSE  = "SIPban  Copyright (C) 2019-2024 Fernando 'El Pop' Romo\n\n";
@@ -306,6 +330,93 @@ sub Manager_Login {
     Send_To_Asterisk(\$command);
 }
 
+# The answer comes as ContactList events, see %AMI_Handler
+sub Request_Contacts {
+    %contacts_next = ();
+    Send_To_Asterisk(\"Action: PJSIPShowContacts\r\nActionID: sipban-contacts\r\n\r\n");
+}
+
+#-----------------#
+# Trust functions #
+#-----------------#
+
+# An ip is trusted if has a registered PJSIP contact or a recent successful
+# authentication. Phones behind the same NAT share the ip, one of them with
+# a bad account or password must not block the others.
+sub Is_Trusted {
+    my $ip = shift;
+    return 1 if (exists($registered_ip{$ip}));
+    return 1 if (exists($trusted_ip{$ip}) && $trusted_ip{$ip} > time());
+    return 0;
+}
+
+sub Parse_Security_Event {
+    my $packet_content_ref = shift;
+    my ($service)    = $$packet_content_ref =~ /\nService\:\s(.*?)\n/i;
+    my ($account_id) = $$packet_content_ref =~ /\nAccountID\:\s(.*?)\n/i;
+    my ($session_id) = $$packet_content_ref =~ /\nSessionID\:\s(.*?)\n/i;
+    my ($remote_ip)  = $$packet_content_ref =~ /\nRemoteAddress\:\sIPV4\/[^\/]*\/([^\/]*)\//i;
+    # the account comes from the SIP request, only to log it
+    $account_id = substr($account_id, 0, 64);
+    $account_id =~ s/[^[:print:]]/?/g;
+    return ($service, $account_id, $session_id, $remote_ip);
+}
+
+#---------------------------------------------------------------------#
+# InvalidAccountID, InvalidPassword, ChallengeResponseFailed and      #
+# FailedACL block the remote ip, unless is trusted. A trusted ip is   #
+# blocked only with "trust.max_failures" events in "trust.interval"   #
+# seconds: a phone with a bad account retries slow, brute force don't #
+#---------------------------------------------------------------------#
+sub Security_Failure {
+    my ($packet_content_ref, $reason) = @_;
+    my ($service, $account_id, $session_id, $remote_ip) = Parse_Security_Event($packet_content_ref);
+    return unless (exists($Services{$service}) && $remote_ip =~ /$IPv4/);
+    delete $pending_auth{"$remote_ip|$session_id"};
+    my $msg = "$reason, AccountID $account_id";
+    if (Is_Trusted($remote_ip)) {
+        my $count = Count_Event("failure $remote_ip", $Config{'trust.interval'});
+        if ($count >= $Config{'trust.max_failures'}) {
+            Ban_IP($remote_ip, "$msg, $count failures from trusted ip");
+        }
+        else {
+            Log_Once("$remote_ip $msg", "IGNORE => $remote_ip ($msg) trusted ip");
+        }
+        return;
+    }
+    Ban_IP($remote_ip, $msg);
+}
+
+#---------------------------------------------------------------------#
+# A challenge (401/407) without SuccessfulAuth in "flood.grace"       #
+# seconds is unanswered. Phones answer the challenges, scanners       #
+# don't: block with "flood.count" unanswered in "flood.interval" secs #
+#---------------------------------------------------------------------#
+sub Check_Pending_Auth {
+    my $now = shift;
+    foreach my $key (keys %pending_auth) {
+        my ($ip, $challenge_time) = @{$pending_auth{$key}};
+        next if (($now - $challenge_time) < $Config{'flood.grace'});
+        delete $pending_auth{$key};
+        next if (Is_Trusted($ip));
+        my $count = Count_Event("noauth $ip", $Config{'flood.interval'});
+        if ($count >= $Config{'flood.count'}) {
+            Ban_IP($ip, "No Auth Response, $count unanswered challenges");
+        }
+    }
+}
+
+# Forget expired trusted ip's and old log keys
+sub Housekeeping {
+    my $now = shift;
+    foreach my $ip (keys %trusted_ip) {
+        delete $trusted_ip{$ip} if ($trusted_ip{$ip} <= $now);
+    }
+    foreach my $key (keys %log_once) {
+        delete $log_once{$key} if (($now - $log_once{$key}) >= 3600);
+    }
+}
+
 #-------------------#
 # Utility functions #
 #-------------------#
@@ -388,24 +499,27 @@ sub Convert_To_Time {
     return $result;
 }
 
-sub getCacheMatch {
-    my $check_value = shift;
-    my $timeout = $Config{'flood.interval'};
-
-    # Check cache for a match.
-    my ($result, $time_cached);
+# Count the events of a key in a window of $interval seconds, the window
+# begins with the first event
+sub Count_Event {
+    my ($key, $interval) = @_;
     my $now = time();
-    my $time_cached;
-    my $cache_entry = $cache{$check_value};
-    if ($cache_entry) {
-        ($result, $time_cached) = @{$cache_entry};
-        if ($now - $time_cached > $timeout) {
-            delete $cache{$check_value};
-            return undef;
-        } else {
-            return ($result, $time_cached);
-       }
+    my $entry = $cache{$key};
+    if ($entry && ($now - $entry->[1]) <= $interval) {
+        $cache{$key} = [ $entry->[0] + 1, $entry->[1] ];
+        return $entry->[0] + 1;
     }
+    $cache{$key} = [ 1, $now ];
+    return 1;
+}
+
+# Write a log line only once per hour for the same key
+sub Log_Once {
+    my ($key, $line) = @_;
+    my $now = time();
+    return if (exists($log_once{$key}) && ($now - $log_once{$key}) < 3600);
+    $log_once{$key} = $now;
+    print LOG Time_Stamp() . " $line\n";
 }
 
 sub Terminate {
@@ -541,6 +655,18 @@ my %Client_Handler = (
             $out_buffer{$client} .= "$ip\n";
         }
     },
+    "trusted" => sub {
+        my $client = shift;
+        my $now = time();
+        $out_buffer{$client} .= '';
+        foreach my $ip (sort keys %registered_ip) {
+            $out_buffer{$client} .= "$ip (registered contact)\n";
+        }
+        foreach my $ip (sort { $trusted_ip{$a} <=> $trusted_ip{$b} } keys %trusted_ip) {
+            next if ($trusted_ip{$ip} <= $now);
+            $out_buffer{$client} .= Time_Stamp($trusted_ip{$ip}) . " $ip (successful auth)\n";
+        }
+    },
     "quit" => sub {
         my $client = shift;
         delete $in_buffer{$client};
@@ -585,13 +711,7 @@ my %AMI_Handler = (
         # RemoteAddress: IPV4/UDP/10.211.55.2/59977
         #-----------------------------
         "InvalidAccountID" => sub {
-            my $packet_content_ref = shift;
-            my ($service)    = $$packet_content_ref =~ /Service\:\s(.*?)\n/isx;
-            my ($account_id) = $$packet_content_ref =~ /AccountID\:\s(.*?)\n/isx;
-            my ($prot, $remote_ip)  = $$packet_content_ref =~ /RemoteAddress\:\sIPV4\/(.*?)\/(.*?)\/.*?\n/isx;
-            if ( ($service eq 'PJSIP') || ($service eq 'SIP') || ($service eq 'IAX') || ($service eq 'IAX2') || ($service eq 'AMI') ) {
-                Ban_IP($remote_ip, 'Invalid Account');
-            }
+            Security_Failure(shift, 'Invalid Account');
         },
         #-----------------------------
         # Event: InvalidPassword
@@ -609,13 +729,41 @@ my %AMI_Handler = (
         # ReceivedHash: 91801011d87fe17fca4aca4893f9920d
         #-----------------------------
         "InvalidPassword" => sub {
-            my $packet_content_ref = shift;
-            my ($service)    = $$packet_content_ref =~ /Service\:\s(.*?)\n/isx;
-            my ($account_id) = $$packet_content_ref =~ /AccountID\:\s(.*?)\n/isx;
-            my ($prot, $remote_ip)  = $$packet_content_ref =~ /RemoteAddress\:\sIPV4\/(.*?)\/(.*?)\/.*?\n/isx;
-            if ( ($service eq 'PJSIP') || ($service eq 'SIP') || ($service eq 'IAX') || ($service eq 'IAX2') || ($service eq 'AMI') ) {
-                Ban_IP($remote_ip, 'Invalid Password');
-            }
+            Security_Failure(shift, 'Invalid Password');
+        },
+        #-----------------------------
+        # PJSIP reports a bad password with this event, not InvalidPassword
+        #
+        # Event: ChallengeResponseFailed
+        # Privilege: security,all
+        # Severity: Error
+        # Service: PJSIP
+        # EventVersion: 1
+        # AccountID: 101
+        # SessionID: 9f3c2e1a5b7d4c6e8a0b@192.168.1.50
+        # LocalAddress: IPV4/UDP/203.0.113.1/5060
+        # RemoteAddress: IPV4/UDP/198.51.100.7/5060
+        # Challenge: 1782379082/60573f75eacde01c393d1172933792fb
+        # Response: 6d6f486145c747e30a74b20bd70abd2b
+        # ExpectedResponse:
+        #-----------------------------
+        "ChallengeResponseFailed" => sub {
+            Security_Failure(shift, 'Challenge Response Failed');
+        },
+        #-----------------------------
+        # Event: FailedACL
+        # Privilege: security,all
+        # Severity: Error
+        # Service: PJSIP
+        # EventVersion: 1
+        # AccountID: anonymous
+        # SessionID: 1969512380@127.0.1.1
+        # LocalAddress: IPV4/UDP/203.0.113.1/5060
+        # RemoteAddress: IPV4/UDP/198.51.100.7/45682
+        # ACLName: registrar_attempt_without_configured_aors
+        #-----------------------------
+        "FailedACL" => sub {
+            Security_Failure(shift, 'Failed ACL');
         },
         #-----------------------------
         # Event: ChallengeSent
@@ -631,23 +779,67 @@ my %AMI_Handler = (
         # Challenge: 43ccaa48
         #-----------------------------
         "ChallengeSent" => sub {
+            my ($service, $account_id, $session_id, $remote_ip) = Parse_Security_Event(shift);
+            return unless (exists($Services{$service}) && $remote_ip =~ /$IPv4/);
+            return if (Is_Trusted($remote_ip) || exists($ban_ip{$remote_ip}));
+            # wait the SuccessfulAuth of the same session (Check_Pending_Auth)
+            my $key = "$remote_ip|$session_id";
+            $pending_auth{$key} = [ $remote_ip, time() ] unless (exists($pending_auth{$key}));
+        },
+        #-----------------------------
+        # Event: SuccessfulAuth
+        # Privilege: security,all
+        # Severity: Informational
+        # Service: PJSIP
+        # EventVersion: 1
+        # AccountID: 101
+        # SessionID: 0_122972204@192.168.1.50
+        # LocalAddress: IPV4/UDP/203.0.113.1/5060
+        # RemoteAddress: IPV4/UDP/198.51.100.7/5060
+        # UsingPassword: 1
+        #-----------------------------
+        "SuccessfulAuth" => sub {
             my $packet_content_ref = shift;
-            my ($service)    = $$packet_content_ref =~ /Service\:\s(.*?)\n/isx;
-            my ($account_id) = $$packet_content_ref =~ /AccountID\:\s(.*?)\n/isx;
-            my ($prot, $remote_ip)  = $$packet_content_ref =~ /RemoteAddress\:\sIPV4\/(.*?)\/(.*?)\/.*?\n/isx;
-            if ( ($service eq 'PJSIP') || ($service eq 'SIP') || ($service eq 'IAX') || ($service eq 'IAX2') || ($service eq 'AMI') ) {
-                my $now = time();
-                my ($count,$cached) = getCacheMatch($remote_ip);
-                if($count != undef) {
-                    $count++;
-                    $cache{$remote_ip} = [ $count, $cached ];
-                    if($count>$Config{'flood.count'}) {
-                        Ban_IP($remote_ip, 'Challenge Sent');
-                    }
-                } else {
-                    $count=1;
-                    $cache{$remote_ip} = [ $count, $now ];
-                }
+            my ($service, $account_id, $session_id, $remote_ip) = Parse_Security_Event($packet_content_ref);
+            my ($using_password) = $$packet_content_ref =~ /\nUsingPassword\:\s(.*?)\n/i;
+            return unless (exists($Services{$service}) && $remote_ip =~ /$IPv4/);
+            delete $pending_auth{"$remote_ip|$session_id"};
+            return unless ($using_password eq '1' && $Config{'trust.ttl'} > 0);
+            unless (Is_Trusted($remote_ip)) {
+                print LOG Time_Stamp() . " TRUST => $remote_ip (Successful Auth, AccountID $account_id)\n";
+            }
+            $trusted_ip{$remote_ip} = time() + $Config{'trust.ttl'};
+        },
+        #-----------------------------
+        # Answer of PJSIPShowContacts, one event per contact
+        #
+        # Event: ContactList
+        # ActionID: sipban-contacts
+        # ObjectType: contact
+        # ObjectName: 101;@a1b2c3d4e5f60718293a4b5c6d7e8f90
+        # ViaAddr: 192.168.1.50
+        # Uri: sip:101@198.51.100.7:5060;ob
+        # Endpoint: 101
+        # Status: Reachable
+        #-----------------------------
+        "ContactList" => sub {
+            my $packet_content_ref = shift;
+            my ($uri) = $$packet_content_ref =~ /\nUri\:\s(.*?)\n/i;
+            my ($via) = $$packet_content_ref =~ /\nViaAddr\:\s(.*?)\n/i;
+            # with NAT the contact needs "rewrite_contact=yes" to have the
+            # public ip of the phone
+            my ($host) = $uri =~ /^sips?\:(?:[^\@]*\@)?([^\:\;\>]+)/i;
+            foreach my $ip ($host, $via) {
+                $contacts_next{$ip} = 1 if (defined($ip) && $ip =~ /$IPv4/);
+            }
+        },
+        "ContactListComplete" => sub {
+            my $before = keys %registered_ip;
+            %registered_ip = %contacts_next;
+            %contacts_next = ();
+            my $after = keys %registered_ip;
+            if ($before != $after) {
+                print LOG Time_Stamp() . " CONTACTS => $after ip's with registered PJSIP contacts\n";
             }
         },
     }, # Event
@@ -658,7 +850,26 @@ my %AMI_Handler = (
                # print LOG Time_Stamp() . " Pong\n";
             }
 
-        }
+        },
+        "Error" => sub {
+            my $packet_content_ref = shift;
+            my ($action_id) = $$packet_content_ref =~ /\nActionID\:\s(.*?)\n/i;
+            my ($message)   = $$packet_content_ref =~ /\nMessage\:\s(.*?)\n/i;
+            if ($action_id eq 'sipban-contacts') {
+                if ($message =~ /No Contacts found/i) {
+                    %registered_ip = ();
+                    %contacts_next = ();
+                }
+                else {
+                    # older Asterisk or AMI user without "system" write permission
+                    $contacts_supported = 0;
+                    print LOG Time_Stamp() . " CONTACTS => PJSIPShowContacts failed ($message), only SuccessfulAuth trust ip's\n";
+                }
+            }
+            else {
+                Log_Once("AMI $message", "AMI => Error ($message)");
+            }
+        },
     } # Response
 );
 
@@ -757,6 +968,7 @@ sub Clean_Connection {
     if ($client eq $asterisk_handler) {
     	$manager_connect_flag =1;
         $event_str = '';
+        %contacts_next = ();
     }
     $select->remove($client);
     close($client);
@@ -812,6 +1024,7 @@ while (1) { # Main loop #
         $manager_connect_flag = Connect_To_Asterisk("$Config{'ami.host'}");
         unless ($manager_connect_flag) {
             Manager_Login();
+            $Contacts_Time = 0;   # ask the contacts right after the login
         }
     }
 
@@ -871,6 +1084,17 @@ while (1) { # Main loop #
     # Clean on block time lapse
     if ($current_time >= $min_epoch) {
         Ipset_Prune_Block($current_time);
+    }
+    # Challenges without answer
+    Check_Pending_Auth($current_time);
+    # Refresh the ip's with registered PJSIP contacts
+    if ($contacts_supported && $Config{'trust.refresh'} > 0 && $current_time >= $Contacts_Time) {
+        $Contacts_Time = $current_time + $Config{'trust.refresh'};
+        Request_Contacts();
+    }
+    if ($current_time >= $Housekeeping_Time) {
+        $Housekeeping_Time = $current_time + 60;
+        Housekeeping($current_time);
     }
 
     # Buffers to flush?
