@@ -61,6 +61,8 @@ my %Config;
 Config::Simple->import_from('/etc/sipban.conf', \%Config) or die Config::Simple->error();
 
 # Defaults of the parameters added in version 1.1.0, older files still work
+$Config{'flood.count'}        = 5    unless (defined($Config{'flood.count'}));
+$Config{'flood.interval'}     = 60   unless (defined($Config{'flood.interval'}));
 $Config{'flood.grace'}        = 5    unless (defined($Config{'flood.grace'}));
 $Config{'trust.ttl'}          = 3600 unless (defined($Config{'trust.ttl'}));
 $Config{'trust.refresh'}      = 60   unless (defined($Config{'trust.refresh'}));

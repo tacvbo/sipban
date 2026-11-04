@@ -189,7 +189,7 @@ The service use iptables, you need the "**root**" user of your system
     # credentials, scanners like sipvicious don't.
     # A challenge is unanswered if no SuccessfulAuth comes in "grace" seconds.
     count=5
-    interval=10
+    interval=60
     grace=5
 
     [trust]
@@ -210,7 +210,7 @@ The service use iptables, you need the "**root**" user of your system
    
     The "iptables->rule" option is how iptables respond to the attack, you can choose "REJECT" or "DROP"
 
-    The flood section will block an ip with a number (count) of challenges without answer in a period of (interval) seconds. In the default configuration 5 unanswered challenges in 10 seconds block the ip. The trust section is explained in "Fork changes". The sections and parameters added by the fork are optional, the defaults are the values of the sample.
+    The flood section will block an ip with a number (count) of challenges without answer in a period of (interval) seconds. In the default configuration 5 unanswered challenges in 60 seconds block the ip. The trust section is explained in "Fork changes". The sections and parameters added by the fork are optional, the defaults are the values of the sample.
    
 3. The White List is on **/etc/sipban.wl**. This file contains the ip address you don't want to block (one ip or ip/class per line, v.g. 192.0.2.0/24). You can change the location modify the sipban configuration file.
    
