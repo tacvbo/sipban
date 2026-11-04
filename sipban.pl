@@ -99,6 +99,7 @@ my %out_buffer    = ();
 my %sessions     = ();
 my %ban_ip       = ();
 my %white_list   = ();
+my %partial_in   = ();   # incomplete line of each socket, waits the next read
 
 tie %in_buffer, 'Tie::RefHash';
 my $event_str = "";
@@ -181,22 +182,38 @@ sub Ipset_Restore_Set {
 
 sub Ipset_Block {
     my ($ip, $msg) = @_;
-    unless( exists($white_list{$ip}) ) {
-        if ($min_epoch > $ban_ip{$ip}) {
-            $min_epoch = $ban_ip{$ip};
-        }        
-        # /usr/sbin/ipset -q add sippban $ip > /dev/null
-        my $rv = qx($ips -q add $Config{'ipset.set_name'} $ip);
-        print LOG Time_Stamp() . " BLOCK => $ip ($msg)\n";
+    if ($min_epoch > $ban_ip{$ip}) {
+        $min_epoch = $ban_ip{$ip};
     }
+    # /usr/sbin/ipset -q add sippban $ip > /dev/null
+    my $rv = qx($ips -q add $Config{'ipset.set_name'} $ip);
+    print LOG Time_Stamp() . " BLOCK => $ip ($msg)\n";
 }
 
 sub Ipset_Unblock {
     my ($ip, $msg) = @_;
-    unless( exists($white_list{$ip}) ) {
-        # /usr/sbin/ipset -q add sippban $ip > /dev/null
-        my $rv = qx($ips -q del $Config{'ipset.set_name'} $ip);
-        print LOG Time_Stamp() . " UNBLOCK => $ip ($msg)\n";
+    # /usr/sbin/ipset -q del sippban $ip > /dev/null
+    my $rv = qx($ips -q del $Config{'ipset.set_name'} $ip);
+    print LOG Time_Stamp() . " UNBLOCK => $ip ($msg)\n";
+}
+
+# Block an ip/class address unless is already blocked or in the white list
+sub Ban_IP {
+    my ($ip, $msg) = @_;
+    return 0 unless ($ip =~ /$IPv4/);
+    return 0 if (exists($ban_ip{$ip}) || In_White_List($ip));
+    $ban_ip{$ip} = time() + $Config{'ipset.timeout'};
+    Ipset_Block($ip, $msg);
+    return 1;
+}
+
+# The white list wins over previous blocks (dump file or a running set)
+sub Ipset_Purge_White_List {
+    foreach my $ip (sort keys %ban_ip) {
+        if (In_White_List($ip)) {
+            Ipset_Unblock($ip, 'White List');
+            delete $ban_ip{$ip};
+        }
     }
 }
 
@@ -243,7 +260,7 @@ sub Ipset_Prune_Block {
 sub Iptables_Create_Chain {
     # /sbin/iptables -t filter -I INPUT -i eno1 -m set --match-set sipban src -j DROP
     my $rv = qx($ipt -t filter -I INPUT -i $Config{'iptables.interface'} -m set --match-set $Config{'ipset.set_name'} src -j $Config{'iptables.rule'});
-    print print LOG Time_Stamp() . " CHAIN => $Config{'iptables.chain'} created\n";
+    print LOG Time_Stamp() . " CHAIN => $Config{'iptables.chain'} created\n";
 }
 
 sub Iptables_Erase_Chain {
@@ -316,6 +333,31 @@ sub Get_IP {
         $status =1;
     }
     return $ip, $status;
+}
+
+sub IP_To_Int {
+    my @octet = split(/\./, shift);
+    return ($octet[0] << 24) + ($octet[1] << 16) + ($octet[2] << 8) + $octet[3];
+}
+
+# True if two ip/class addresses share at least one address
+sub CIDR_Overlap {
+    my ($first, $second) = @_;
+    my ($first_ip, $first_net)   = split(/\//, $first);
+    my ($second_ip, $second_net) = split(/\//, $second);
+    $first_net  = 32 unless (defined($first_net));
+    $second_net = 32 unless (defined($second_net));
+    my $net  = ($first_net < $second_net) ? $first_net : $second_net;
+    my $mask = ($net == 0) ? 0 : (0xFFFFFFFF << (32 - $net)) & 0xFFFFFFFF;
+    return ((IP_To_Int($first_ip) & $mask) == (IP_To_Int($second_ip) & $mask));
+}
+
+sub In_White_List {
+    my $ip = shift;
+    foreach my $address (keys %white_list) {
+        return 1 if (CIDR_Overlap($ip, $address));
+    }
+    return 0;
 }
 
 sub Time_Stamp {
@@ -399,9 +441,11 @@ my %Client_Handler = (
                 if (exists($ban_ip{$ip})) {
                     $out_buffer{$client} .= "$ip previously blocked\n";
                 }
+                elsif (In_White_List($ip)) {
+                    $out_buffer{$client} .= "$ip is in the white list\n";
+                }
                 else {
-                    $ban_ip{$ip} = time() + $Config{'ipset.timeout'};
-                    Ipset_Block($ip,'Manual block');
+                    Ban_IP($ip, 'Manual block');
                     $out_buffer{$client} .= "$ip block\n";
                 }
             }
@@ -452,6 +496,7 @@ my %Client_Handler = (
         my $client = shift;
         Ipset_Restore_Set($client);
         Ipset_Load_Ban_IP();
+        Ipset_Purge_White_List();
         $out_buffer{$client} .= "ipset $Config{'ipset.set_name'} restore\n";
     },
     "help" => sub {
@@ -500,6 +545,7 @@ my %Client_Handler = (
         my $client = shift;
         delete $in_buffer{$client};
         delete $out_buffer{$client};
+        delete $partial_in{$client};
         delete $sessions{$client};
         $select->remove($client);
         close($client);
@@ -544,10 +590,7 @@ my %AMI_Handler = (
             my ($account_id) = $$packet_content_ref =~ /AccountID\:\s(.*?)\n/isx;
             my ($prot, $remote_ip)  = $$packet_content_ref =~ /RemoteAddress\:\sIPV4\/(.*?)\/(.*?)\/.*?\n/isx;
             if ( ($service eq 'PJSIP') || ($service eq 'SIP') || ($service eq 'IAX') || ($service eq 'IAX2') || ($service eq 'AMI') ) {
-                unless( exists($ban_ip{"$remote_ip"}) ) {
-                    $ban_ip{$remote_ip} = time() + $Config{'ipset.timeout'};
-                    Ipset_Block($remote_ip,'Invalid Account');
-                }
+                Ban_IP($remote_ip, 'Invalid Account');
             }
         },
         #-----------------------------
@@ -571,10 +614,7 @@ my %AMI_Handler = (
             my ($account_id) = $$packet_content_ref =~ /AccountID\:\s(.*?)\n/isx;
             my ($prot, $remote_ip)  = $$packet_content_ref =~ /RemoteAddress\:\sIPV4\/(.*?)\/(.*?)\/.*?\n/isx;
             if ( ($service eq 'PJSIP') || ($service eq 'SIP') || ($service eq 'IAX') || ($service eq 'IAX2') || ($service eq 'AMI') ) {
-                unless( exists($ban_ip{"$remote_ip"}) ) {
-                    $ban_ip{$remote_ip} = time() + $Config{'ipset.timeout'};
-                    Ipset_Block($remote_ip,'Invalid Password');
-                }
+                Ban_IP($remote_ip, 'Invalid Password');
             }
         },
         #-----------------------------
@@ -602,10 +642,7 @@ my %AMI_Handler = (
                     $count++;
                     $cache{$remote_ip} = [ $count, $cached ];
                     if($count>$Config{'flood.count'}) {
-                        unless( exists($ban_ip{"$remote_ip"}) ) {
-                            $ban_ip{$remote_ip} = time() + $Config{'ipset.timeout'};
-                            Ipset_Block($remote_ip,'Challenge Sent');
-                        }
+                        Ban_IP($remote_ip, 'Challenge Sent');
                     }
                 } else {
                     $count=1;
@@ -713,11 +750,13 @@ sub Clean_Connection {
     # Delete working buffers
     delete $in_buffer{$client};
     delete $out_buffer{$client};
+    delete $partial_in{$client};
     delete $sessions{$client};
 
     # Check if the connection to Asterisk Die and turn the reconnection Flag
     if ($client eq $asterisk_handler) {
     	$manager_connect_flag =1;
+        $event_str = '';
     }
     $select->remove($client);
     close($client);
@@ -755,7 +794,7 @@ else {
         Ipset_Create_Set();
     }
 }
-
+Ipset_Purge_White_List();
 
 # Check if exists the chain name or else create one
 my @Answer = qx($ipt -S $Config{'iptables.chain'});
@@ -797,6 +836,9 @@ while (1) { # Main loop #
                 next;
             }
             $data =~ s/\0/\r\n/g;
+            # a read can end in the middle of a line, the remainder of the
+            # previous read goes first
+            $data = $partial_in{$client} . $data if (exists($partial_in{$client}));
             # test whether the data in the buffer or the data we
             # just read means there is a complete request waiting
             # to be fulfilled.  If there is, set $inbuffer{$client}
@@ -804,6 +846,8 @@ while (1) { # Main loop #
             while ($data =~ s/(.*\r\n)//) {
                 push( @{$in_buffer{$client}}, $1 );
             }
+            # keep the incomplete line (limited, in case of garbage)
+            $partial_in{$client} = (length($data) < 65536) ? $data : '';
         }
     }
 
