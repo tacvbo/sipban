@@ -12,7 +12,7 @@ it processes the events of the PJSIP and SIP channels (also IAX and AMI).
 Upstream tested SIPban with Asterisk 16.3.0 to 22.1.0. The fork changes were
 checked against the source code of Asterisk 16.3.0.
 
-## Fork changes (2026-11-04)
+## Fork changes (version 1.1.0, 2026-11-04)
 
 This fork (https://github.com/tacvbo/sipban) focuses on PJSIP and on not
 blocking your own phones. Phones behind NAT share the same public IP, so with
@@ -36,11 +36,24 @@ SUBSCRIBE with a 401) reached the ChallengeSent flood counter.
   with it and never sends InvalidPassword) and *FailedACL*.
 * The `BLOCK` log line includes the AccountID, which helps to find a phone
   with a wrong account.
-* The whitelist accepts classes (`192.0.2.0/24`), and whitelisted addresses
-  are removed from the set at startup and on `restore`.
-* The INPUT rule is checked with `iptables -C`, so a restart after an
-  unclean stop does not insert it twice.
-* New console command `trusted`.
+* **Failures are visible**: if the ipset or iptables command is missing, the
+  set cannot be created or the INPUT rule cannot be inserted, sipban stops at
+  startup with an error (exit status 78) instead of logging blocks that do
+  not happen. Other ipset and iptables failures are logged as `ERROR`.
+* The set is saved to a temporary file first, so a failed save no longer
+  empties the dump file, and an empty or damaged dump file starts an empty
+  set.
+* At startup, the copies of the INPUT rule left by an unclean stop are
+  deleted before the rule is inserted, and every copy is deleted on stop.
+* The whitelist accepts classes (`192.0.2.0/24`) and comments (`#`), and
+  whitelisted addresses are removed from the set at startup and on
+  `restore`.
+* The console shows until when each IP is blocked or trusted; new command
+  `trusted`.
+* init.d: `reload` restarts sipban (it used to stop it) and `start` reports
+  a failed start. systemd: the errors go to the journal, and a startup error
+  does not cause a restart loop.
+* Tests with a simulated AMI in `test/`.
 * Removed: the legacy iptables version, the Docker files and the firewall
   sample.
 
