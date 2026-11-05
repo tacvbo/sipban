@@ -173,7 +173,7 @@ sipban changes the iptables rules, so it must run as **root**.
 
     # iptables rule that applies the set of blocked IPs
     [iptables]
-    # Directory of the iptables command
+    # Directory of the iptables command ("which iptables" shows it)
     path       = "/sbin/"
     # DROP discards the packets of a blocked IP without answering (recommended).
     # REJECT answers every packet with an ICMP error, which tells the attacker
@@ -187,7 +187,8 @@ sipban changes the iptables rules, so it must run as **root**.
 
     # ipset set with the blocked IPs
     [ipset]
-    # Directory of the ipset command
+    # Directory of the ipset command ("which ipset" shows it); if it is wrong,
+    # sipban stops at startup with an error
     path     = "/sbin/"
     set_name = "sipban"
     # The set is saved to this file on stop and restored from it on start
