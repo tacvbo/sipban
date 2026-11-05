@@ -118,21 +118,26 @@ sipban changes the iptables rules, so it must run as **root**.
 
 5. Install the startup script
 
-    a) init.d
+    a) init.d, for systems of the Red Hat family without systemd (e.g. CentOS 6)
 
     ```
     sudo cp etc/init.d/sipban /etc/init.d/.
     sudo chkconfig --level 345 sipban on
-    sudo /etc/init.d/sipban start
+    sudo service sipban start
     ```
 
-    b) systemd
+    "service sipban reload" restarts sipban: the blocked IPs are saved to the dump file and restored.
+
+    b) systemd, for newer systems (e.g. Ubuntu, Debian, CentOS 7 and later)
 
     ```
     sudo cp etc/systemd/system/sipban.service /etc/systemd/system/.
+    sudo systemctl daemon-reload
     sudo systemctl enable sipban
     sudo systemctl start sipban
     ```
+
+    If sipban stops at startup (for example, because of a wrong path in **/etc/sipban.conf**), the reason is in **/var/log/sipban.log**, and also in **/var/log/sipban_daemon.log** (init.d) or in "systemctl status sipban" (systemd). systemd does not restart sipban after such an error.
 
 ## Configure
 
