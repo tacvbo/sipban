@@ -1,0 +1,20 @@
+# logrotate configuration for sipban: copy it to /etc/logrotate.d/sipban
+#
+# sipban opens its log once and cannot reopen it (it stops on HUP), so the
+# logs are copied and then truncated in place (copytruncate). Both are
+# opened in append mode, so sipban keeps writing at the start of the
+# truncated file. A line written between the copy and the truncation is
+# lost.
+#
+# /var/log/sipban_daemon.log is the output of sipban when it runs from the
+# init.d script.
+
+/var/log/sipban.log /var/log/sipban_daemon.log {
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

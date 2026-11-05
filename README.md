@@ -152,6 +152,14 @@ sipban changes the iptables rules, so it must run as **root**.
 
     If sipban stops at startup (for example, because of a wrong path in **/etc/sipban.conf**), the reason is in **/var/log/sipban.log**, and also in **/var/log/sipban_daemon.log** (init.d) or in "systemctl status sipban" (systemd). systemd does not restart sipban after such an error.
 
+6. Install the log rotation
+
+    ```
+    sudo cp etc/logrotate.d/sipban /etc/logrotate.d/.
+    ```
+
+    It rotates **/var/log/sipban.log** and **/var/log/sipban_daemon.log** every week and keeps 8 weeks. sipban cannot reopen its log, so the files are copied and truncated in place (copytruncate); the comments of the file explain it.
+
 ## Configure
 
 1. **/etc/asterisk/manager.conf** needs this configuration:
