@@ -537,6 +537,13 @@ sub Time_Stamp {
     return sprintf("\[%04d-%02d-%02d %02d:%02d:%02d\]",$year,$month,$day,$hour,$min,$sec);
 }
 
+# Date and time for the console, without the brackets of the log
+sub Console_Time {
+    my $time = Time_Stamp(shift);
+    $time =~ s/[\[\]]//g;
+    return $time;
+}
+
 sub Convert_To_Time {
     my $time = shift;
     my $days = int($time / 86400);
@@ -647,7 +654,7 @@ my %Client_Handler = (
         }
         else {
             foreach my $ip (sort { $ban_ip{$a} <=> $ban_ip{$b} } keys %ban_ip) {
-                $out_buffer{$client} .= Time_Stamp($ban_ip{$ip}) . " $ip\n";
+                $out_buffer{$client} .= "$ip (blocked until " . Console_Time($ban_ip{$ip}) . ")\n";
             }
         }
     },
@@ -742,7 +749,7 @@ my %Client_Handler = (
         }
         foreach my $ip (sort { $trusted_ip{$a} <=> $trusted_ip{$b} } keys %trusted_ip) {
             next if ($trusted_ip{$ip} <= $now);
-            $out_buffer{$client} .= Time_Stamp($trusted_ip{$ip}) . " $ip (successful authentication)\n";
+            $out_buffer{$client} .= "$ip (successful authentication, trusted until " . Console_Time($trusted_ip{$ip}) . ")\n";
         }
     },
     "quit" => sub {
