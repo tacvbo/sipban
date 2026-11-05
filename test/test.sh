@@ -28,6 +28,7 @@ lacks_errors() { ! cat "$W/stderr" "$W/stdout" | grep -q .; }
 echo "== contacts ok: trusted IPs, events, whitelist, console"
 "$T/run.sh" ok 12
 log_has   'UNBLOCK => 192.0.2.99 (White List)'
+log_lacks 'WHITE LIST => 198.51.100.20'
 log_has   'IPTABLES => INPUT rule for set sipban created'
 log_has   'CONTACTS => 3 IPs with registered PJSIP contacts'
 check     'repeated failure of a registered IP is logged once' \

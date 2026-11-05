@@ -236,7 +236,9 @@ sipban changes the iptables rules, so it must run as **root**.
 
     The flood section blocks an IP after a number (count) of unanswered challenges within a period (interval) in seconds. With the default configuration, 5 unanswered challenges within 60 seconds block the IP. The trust section is explained in "Fork changes". The sections and parameters added by the fork are optional; their defaults are the values of the sample.
 
-3. The whitelist is **/etc/sipban.wl**. It has the IP addresses that are never blocked, one IP address or class per line (e.g. 192.0.2.0/24). You can change its location in the configuration file.
+3. The whitelist is **/etc/sipban.wl**. It has the IP addresses that are never blocked, one IP address or class per line (e.g. 192.0.2.0/24); everything after "#" is a comment. You can change its location in the configuration file.
+
+    You do not need to whitelist the phones: an IP with a registered PJSIP contact or a recent successful authentication is trusted automatically (see "Fork changes"). Whitelist what never registers or authenticates, such as SIP trunks identified by IP ("pjsip show identifies" lists their addresses), and the addresses you manage the server from: a blocked IP loses access to every port on the interface, not only SIP.
 
 4. On stop, sipban saves the blocked IPs and their remaining time to **/etc/sipban.dump**, and it restores them on start.
 

@@ -28,7 +28,7 @@ Requirements: Perl 5 with its core modules, and the ports 15038 (AMI) and
 
 | Scenario | Checks |
 |---|---|
-| contacts ok | Registered PJSIP contacts and SuccessfulAuth make an IP trusted; its failures are logged once as `IGNORE`. Unknown IPs are blocked with InvalidAccountID, ChallengeResponseFailed and FailedACL. Unanswered challenges block after `flood.count`. A brute force attack from a trusted IP is blocked after `trust.max_failures`. Whitelist classes, services that are not processed, IPv6 addresses, control characters in the AccountID, an event split between two reads, the console commands and the dump file. |
+| contacts ok | Registered PJSIP contacts and SuccessfulAuth make an IP trusted; its failures are logged once as `IGNORE`. Unknown IPs are blocked with InvalidAccountID, ChallengeResponseFailed and FailedACL. Unanswered challenges block after `flood.count`. A brute force attack from a trusted IP is blocked after `trust.max_failures`. Whitelist classes and comments, services that are not processed, IPv6 addresses, control characters in the AccountID, an event split between two reads, the console commands and the dump file. |
 | PJSIPShowContacts fails | The error is logged once, sipban stops asking, and SuccessfulAuth still trusts IPs. |
 | no contacts | "No Contacts found" is not an error: sipban keeps asking. |
 | configuration of version 1.0 | A configuration without `[trust]` and `flood.grace` works with the defaults. |

@@ -30,7 +30,7 @@ export FAKE_STATE="$W"
 [ -n "$RULES" ] && echo "$RULES" > "$W/rules"
 
 sed -e "${CONF_SED:-}" -e "s|TESTDIR|$T|g" "${CONF:-$T/sipban.conf}" > "$W/sipban.conf"
-printf '127.0.0.1\n192.0.2.0/24 # office\n' > "$W/sipban.wl"
+printf '127.0.0.1\n192.0.2.0/24 # office\n# 198.51.100.20 commented out\n' > "$W/sipban.wl"
 case "${DUMP:-previous}" in
   previous)
     # dump of a previous run: one whitelisted IP and one that is not

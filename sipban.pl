@@ -1060,8 +1060,9 @@ foreach my $command ($ips, $ipt) {
 # Load the whitelist
 if (-e $Config{'iptables.white_list'}) {
     open WL, "< $Config{'iptables.white_list'}" || die "Can\'t open the whitelist\n";
-    while(<WL>) { # one address per line
+    while(<WL>) { # one address per line; "#" starts a comment
         chomp;
+        s/#.*//;
         my ($ip, $valid) = Get_IP($_);
         if ($valid) {
             $white_list{$ip} = 1;
