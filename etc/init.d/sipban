@@ -17,6 +17,15 @@ case "$1" in
 	daemon $DAEMON $OPTIONS
 	RETVAL=$?
 	echo
+	# with -d, sipban.pl detaches before it reads its configuration, so an
+	# error at startup only shows up a moment later
+	if [ $RETVAL -eq 0 ]; then
+		sleep 2
+		if ! status sipban.pl > /dev/null; then
+			echo "SIPban stopped at startup, see /var/log/sipban.log"
+			RETVAL=1
+		fi
+	fi
 	[ $RETVAL -eq 0 ] && touch /var/lock/subsys/sipban.pl
 	;;
   stop)
@@ -33,10 +42,10 @@ case "$1" in
 	RETVAL=$?
 	;;
   reload)
-	echo -n "Reloading SIPban: "
-	killproc sipban.pl -HUP
+	# sipban.pl stops on HUP, so a reload is a restart (the blocked IPs are
+	# saved to the dump file and restored)
+	$0 restart
 	RETVAL=$?
-	echo
 	;;
   status)
 	status sipban.pl
