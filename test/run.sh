@@ -10,6 +10,9 @@
 #   RULES      copies of the sipban INPUT rule that already exist at
 #              startup, as after an unclean stop (default 0)
 #   SIPBAN_PL  program to test (default ../sipban.pl)
+#   CONF_SED   sed expression applied to the configuration, e.g. to use a
+#              wrong ipset path
+#   IPSET_FAIL ipset commands that fail (see bin/ipset), e.g. "add save"
 #
 # Nothing touches the real system: ipset and iptables are the fake
 # commands in test/bin/, and the CPAN modules are the stubs in test/lib/.
@@ -24,7 +27,7 @@ mkdir -p "$W"
 export FAKE_STATE="$W"
 [ -n "$RULES" ] && echo "$RULES" > "$W/rules"
 
-sed "s|TESTDIR|$T|g" "${CONF:-$T/sipban.conf}" > "$W/sipban.conf"
+sed -e "${CONF_SED:-}" -e "s|TESTDIR|$T|g" "${CONF:-$T/sipban.conf}" > "$W/sipban.conf"
 printf '127.0.0.1\n192.0.2.0/24 # office\n' > "$W/sipban.wl"
 # dump of a previous run: one whitelisted IP and one that is not
 printf '%s\n' 'create sipban hash:net family inet hashsize 4096 maxelem 65536 timeout 604800' \
@@ -40,8 +43,8 @@ perl -I "$T/lib" "$W/sipban.pl" > "$W/stdout" 2> "$W/stderr" &
 SIPBAN=$!
 sleep "$SECONDS_BEFORE_CONSOLE"
 perl "$T/console.pl" 14451 "block 192.0.2.5" "block 198.51.100.20" "trusted" \
-     "unblock 198.51.100.20" "block" "quit" > "$W/console.out"
-kill -TERM $SIPBAN
+     "unblock 198.51.100.20" "block" "quit" > "$W/console.out" 2> "$W/console.err"
+kill -TERM $SIPBAN 2>/dev/null
 sleep 1
 kill $AMI 2>/dev/null
 wait 2>/dev/null

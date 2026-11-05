@@ -175,50 +175,71 @@ print LOG Time_Stamp() . " SipBan Start\n";
 #-----------------#
 
 sub Ipset_Exists_Set {
-    my @rv = ();
-    @rv = qx($ips list -t $Config{'ipset.set_name'});
-    if ( $rv[0] =~ /Name\:\s$Config{'ipset.set_name'}/g) {
-        return 1;
-    }
-    else {
-        return 0;
-    }
+    # /usr/sbin/ipset list -t sipban
+    my ($ok, $output) = Run_Command("$ips list -t $Config{'ipset.set_name'} 2>&1");
+    return ($ok && $output =~ /Name\:\s$Config{'ipset.set_name'}/) ? 1 : 0;
 }
 
 sub Ipset_Create_Set {
     # /usr/sbin/ipset create sipban hash:net hashsize 4096 timeout 604800
-    my $rv = qx($ips create $Config{'ipset.set_name'} hash:net hashsize 4096 timeout $Config{'ipset.timeout'});
+    my ($ok, $output) = Run_Command("$ips create $Config{'ipset.set_name'} hash:net hashsize 4096 timeout $Config{'ipset.timeout'} 2>&1");
+    Fatal("ipset could not create the set $Config{'ipset.set_name'}: $output") unless ($ok);
     print LOG Time_Stamp() . " IPSET => set $Config{'ipset.set_name'} created\n";
 }
 
 sub Ipset_Destroy_Set {
     # /usr/sbin/ipset destroy sipban
-    my $rv = qx($ips destroy $Config{'ipset.set_name'});
-    print LOG Time_Stamp() . " IPSET => set $Config{'ipset.set_name'} destroyed\n";
+    my ($ok, $output) = Run_Command("$ips destroy $Config{'ipset.set_name'} 2>&1");
+    if ($ok) {
+        print LOG Time_Stamp() . " IPSET => set $Config{'ipset.set_name'} destroyed\n";
+    }
+    else {
+        print LOG Time_Stamp() . " ERROR => ipset could not destroy the set $Config{'ipset.set_name'}: $output\n";
+    }
 }
 
 sub Ipset_Save {
     # /usr/sbin/ipset save sipban > /etc/sipban.dump
-    my $rv = qx($ips save $Config{'ipset.set_name'} > $Config{'ipset.dump'});
-    print LOG Time_Stamp() . " IPSET => set $Config{'ipset.set_name'} saved\n";
+    # It writes a temporary file first: if ipset fails, the previous dump
+    # file is kept instead of being left empty.
+    my $temporary = "$Config{'ipset.dump'}.tmp";
+    my ($ok, $output) = Run_Command("$ips save $Config{'ipset.set_name'} 2>&1 > $temporary");
+    if ($ok && rename($temporary, $Config{'ipset.dump'})) {
+        print LOG Time_Stamp() . " IPSET => set $Config{'ipset.set_name'} saved\n";
+    }
+    else {
+        unlink($temporary);
+        print LOG Time_Stamp() . " ERROR => ipset could not save the set $Config{'ipset.set_name'}, $Config{'ipset.dump'} is unchanged: $output\n";
+    }
 }
 
 sub Ipset_Restore_Set {
     if (-e $Config{'ipset.dump'}) {
         # /usr/sbin/ipset restore -! < /etc/sipban.dump
-        my $rv = qx($ips restore -! < $Config{'ipset.dump'});
-        print LOG Time_Stamp() . " IPSET => set $Config{'ipset.set_name'} restored\n";
+        my ($ok, $output) = Run_Command("$ips restore -! < $Config{'ipset.dump'} 2>&1");
+        if ($ok) {
+            print LOG Time_Stamp() . " IPSET => set $Config{'ipset.set_name'} restored\n";
+        }
+        else {
+            print LOG Time_Stamp() . " ERROR => ipset could not restore $Config{'ipset.dump'}: $output\n";
+        }
     }
 }
 
+# Returns 1 if the address was added to the set
 sub Ipset_Block {
     my ($ip, $msg) = @_;
+    # /usr/sbin/ipset add sipban 192.0.2.10 -exist
+    my ($ok, $output) = Run_Command("$ips add $Config{'ipset.set_name'} $ip -exist 2>&1");
+    unless ($ok) {
+        print LOG Time_Stamp() . " ERROR => ipset could not block $ip ($msg): $output\n";
+        return 0;
+    }
     if ($min_epoch > $ban_ip{$ip}) {
         $min_epoch = $ban_ip{$ip};
     }
-    # /usr/sbin/ipset -q add sipban 192.0.2.10
-    my $rv = qx($ips -q add $Config{'ipset.set_name'} $ip);
     print LOG Time_Stamp() . " BLOCK => $ip ($msg)\n";
+    return 1;
 }
 
 sub Ipset_Unblock {
@@ -234,7 +255,11 @@ sub Ban_IP {
     return 0 unless ($ip =~ /$IPv4/);
     return 0 if (exists($ban_ip{$ip}) || In_White_List($ip));
     $ban_ip{$ip} = time() + $Config{'ipset.timeout'};
-    Ipset_Block($ip, $msg);
+    unless (Ipset_Block($ip, $msg)) {
+        # not blocked: the next event tries again
+        delete $ban_ip{$ip};
+        return 0;
+    }
     return 1;
 }
 
@@ -292,29 +317,25 @@ sub Ipset_Prune_Block {
 # Iptables functions #
 #--------------------#
 
-sub Iptables_Exists_Rule {
-    # /sbin/iptables -t filter -C INPUT -i eno1 -m set --match-set sipban src -j DROP
-    system("$ipt -t filter -C INPUT $ipt_rule > /dev/null 2>&1");
-    return ($? == 0) ? 1 : 0;
-}
-
 sub Iptables_Create_Rule {
     # /sbin/iptables -t filter -I INPUT -i eno1 -m set --match-set sipban src -j DROP
-    my $rv = qx($ipt -t filter -I INPUT $ipt_rule);
+    my ($ok, $output) = Run_Command("$ipt -t filter -I INPUT $ipt_rule 2>&1");
+    Fatal("iptables could not insert the INPUT rule: $output") unless ($ok);
     print LOG Time_Stamp() . " IPTABLES => INPUT rule for set $Config{'ipset.set_name'} created\n";
 }
 
+# Delete every copy of the INPUT rule and return how many there were. An
+# unclean stop leaves the rule in place, and the set cannot be destroyed while
+# a rule still uses it. "iptables -D" fails when no copy is left.
 sub Iptables_Erase_Rule {
     # /sbin/iptables -t filter -D INPUT -i eno1 -m set --match-set sipban src -j DROP
-    # Delete every copy: before version 1.1.0 an unclean stop left the rule in
-    # place and the next start inserted it again, and the set cannot be
-    # destroyed while a rule still uses it
     my $copies = 0;
-    while (Iptables_Exists_Rule() && $copies < 100) {
-        my $rv = qx($ipt -t filter -D INPUT $ipt_rule);
+    while ($copies < 100) {
+        my ($ok) = Run_Command("$ipt -t filter -D INPUT $ipt_rule 2>&1");
+        last unless ($ok);
         $copies++;
     }
-    print LOG Time_Stamp() . " IPTABLES => INPUT rule for set $Config{'ipset.set_name'} erased\n";
+    return $copies;
 }
 
 #--------------------#
@@ -550,6 +571,23 @@ sub Count_Event {
     return 1;
 }
 
+# Run a shell command; returns whether it succeeded and its output. The
+# caller adds "2>&1" to capture the error messages.
+sub Run_Command {
+    my $command = shift;
+    my $output = qx($command);
+    chomp($output);
+    return ($? == 0, $output);
+}
+
+# Log the reason and stop: without the set and the INPUT rule, nothing would
+# be blocked
+sub Fatal {
+    my $msg = shift;
+    print LOG Time_Stamp() . " ERROR => $msg\n";
+    die "sipban: $msg\n";
+}
+
 # Write a log line at most once per hour for the same key
 sub Log_Once {
     my ($key, $line) = @_;
@@ -561,6 +599,7 @@ sub Log_Once {
 
 sub Terminate {
     Iptables_Erase_Rule();
+    print LOG Time_Stamp() . " IPTABLES => INPUT rule for set $Config{'ipset.set_name'} erased\n";
     Ipset_Save();
     Ipset_Destroy_Set();
 
@@ -594,9 +633,11 @@ my %Client_Handler = (
                 elsif (In_White_List($ip)) {
                     $out_buffer{$client} .= "$ip is whitelisted\n";
                 }
-                else {
-                    Ban_IP($ip, 'Manual block');
+                elsif (Ban_IP($ip, 'Manual block')) {
                     $out_buffer{$client} .= "$ip blocked\n";
+                }
+                else {
+                    $out_buffer{$client} .= "$ip could not be blocked (see the log)\n";
                 }
             }
             else {
@@ -1010,6 +1051,11 @@ sub Clean_Connection {
 #      Main block      #
 #======================#
 
+# The ipset and iptables commands must exist, otherwise nothing is blocked
+foreach my $command ($ips, $ipt) {
+    Fatal("$command not found, check ipset.path and iptables.path in /etc/sipban.conf") unless (-x $command);
+}
+
 # Load the whitelist
 if (-e $Config{'iptables.white_list'}) {
     open WL, "< $Config{'iptables.white_list'}" || die "Can\'t open the whitelist\n";
@@ -1040,13 +1086,15 @@ else {
         Ipset_Create_Set();
     }
 }
+Fatal("the ipset set $Config{'ipset.set_name'} does not exist (see the previous errors)") unless (Ipset_Exists_Set());
 Ipset_Purge_White_List();
 
-# Insert the INPUT rule, unless it is still there because sipban was not
-# stopped cleanly
-unless (Iptables_Exists_Rule()) {
-    Iptables_Create_Rule();
+# Insert the INPUT rule; the copies left by an unclean stop are deleted first
+my $leftover_rules = Iptables_Erase_Rule();
+if ($leftover_rules > 0) {
+    print LOG Time_Stamp() . " IPTABLES => $leftover_rules INPUT rules left by an unclean stop deleted\n";
 }
+Iptables_Create_Rule();
 
 # Main loop
 

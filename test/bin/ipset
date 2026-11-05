@@ -1,10 +1,14 @@
 #!/bin/bash
 # Fake ipset for the tests: the members of the set are lines of
 # $FAKE_STATE/members, and every call is appended to $FAKE_STATE/calls.log.
-# It only implements the commands that sipban.pl uses.
+# It only implements the commands that sipban.pl uses. IPSET_FAIL is a list
+# of commands that fail, e.g. IPSET_FAIL="add save".
 D="${FAKE_STATE:?FAKE_STATE is not set}"
 echo "ipset $*" >> "$D/calls.log"
 [ "$1" = "-q" ] && shift
+case " $IPSET_FAIL " in
+  *" $1 "*) echo "ipset v6.11: simulated failure of $1" >&2; exit 1 ;;
+esac
 case "$1" in
   list)
     if [ "$2" = "-t" ]; then

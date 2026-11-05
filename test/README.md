@@ -32,7 +32,9 @@ Requirements: Perl 5 with its core modules, and the ports 15038 (AMI) and
 | PJSIPShowContacts fails | The error is logged once, sipban stops asking, and SuccessfulAuth still trusts IPs. |
 | no contacts | "No Contacts found" is not an error: sipban keeps asking. |
 | configuration of version 1.0 | A configuration without `[trust]` and `flood.grace` works with the defaults. |
-| INPUT rule left by an unclean stop | sipban does not insert the rule again, and on stop it deletes every copy. |
+| INPUT rule left by an unclean stop | sipban deletes the leftover copies, inserts the rule once and deletes it on stop. |
+| wrong ipset path | sipban refuses to start with a clear error, inserts no rule and keeps the dump file. |
+| ipset fails to block and to save | The failures are logged as `ERROR` instead of `BLOCK`, the console reports them, and the dump file is kept. |
 
 To check that a change does not break anything, run `test/test.sh` before
 and after it. To test another version of the program:
@@ -49,7 +51,7 @@ SIPBAN_PL=/path/to/sipban.pl test/test.sh
 | `run.sh` | Runs one scenario: starts the simulated AMI and sipban, sends console commands and stops sipban with SIGTERM. The results stay in `work/`. |
 | `fake_ami.pl` | Simulated AMI: answers Login, Ping and PJSIPShowContacts, and sends the security events of the scenario with the format of Asterisk 16 (PJSIP). |
 | `console.pl` | Sends commands to the sipban console and prints the answers. |
-| `bin/ipset`, `bin/iptables` | Fake commands: they keep their state in files of `work/` and log every call to `work/calls.log`. |
+| `bin/ipset`, `bin/iptables` | Fake commands: they keep their state in files of `work/` and log every call to `work/calls.log`. `bin/ipset` can simulate failures (`IPSET_FAIL`). |
 | `lib/` | Stubs of the CPAN modules (Config::Simple, Tie::Cache, Proc::PID::File, Net::Whois::IP). They take precedence over the installed modules. |
 | `sipban.conf` | Configuration of the tests: small thresholds and a contact refresh every 2 seconds. |
 | `sipban-defaults.conf` | Configuration in the format of version 1.0. |
@@ -63,6 +65,9 @@ dump file and the log to `test/`.
 * `CONF`: configuration file (default `test/sipban.conf`).
 * `RULES`: copies of the INPUT rule that exist at startup (default 0).
 * `SIPBAN_PL`: program to test (default `sipban.pl` of the repository).
+* `CONF_SED`: sed expression applied to the configuration, e.g. to use a
+  wrong ipset path.
+* `IPSET_FAIL`: ipset commands that fail, e.g. `IPSET_FAIL="add save"`.
 
 ## Results in work/
 
@@ -73,7 +78,8 @@ dump file and the log to `test/`.
 | `calls.log` | Every ipset and iptables call. |
 | `sipban.dump` | Dump file saved on stop. |
 | `rules` | Copies of the INPUT rule at the end. |
-| `stderr`, `stdout` | Output of sipban (it should be empty, apart from the fake ipset message "The set does not exist"). |
+| `stderr`, `stdout` | Output of sipban (empty, unless sipban stops with an error). |
+| `console.err` | Errors of the console client (e.g. when sipban did not start). |
 | `ami.err` | Number of PJSIPShowContacts requests. |
 
 ## Limits

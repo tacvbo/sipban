@@ -23,7 +23,7 @@ log_has()     { check "log has: $1" has sipban.log "$1"; }
 log_lacks()   { check "log lacks: $1" lacks sipban.log "$1"; }
 console_has() { check "console shows: $1" has console.out "$1"; }
 no_errors()   { check "no Perl errors or warnings" lacks_errors; }
-lacks_errors() { ! grep -v 'The set does not exist' "$W/stderr" "$W/stdout" | grep -q .; }
+lacks_errors() { ! cat "$W/stderr" "$W/stdout" | grep -q .; }
 
 echo "== contacts ok: trusted IPs, events, whitelist, console"
 "$T/run.sh" ok 12
@@ -86,9 +86,26 @@ no_errors
 
 echo "== INPUT rule left by an unclean stop (2 copies)"
 RULES=2 "$T/run.sh" ok 4
-check     'the rule is not inserted again' lacks calls.log '-I INPUT'
-check     'both copies are deleted on stop' times 2 calls.log '-D INPUT'
-check     'no copies remain' has rules '0'
+log_has   'IPTABLES => 2 INPUT rules left by an unclean stop deleted'
+check     'the rule is inserted once' times 1 calls.log '-I INPUT'
+check     'no copies remain after the stop' has rules '0'
+no_errors
+
+echo "== wrong ipset path: sipban refuses to start"
+CONF_SED='/^\[ipset\]/,/^\[/ s|^path .*|path = "TESTDIR/missing/"|' "$T/run.sh" ok 2
+log_has   'missing/ipset not found, check ipset.path and iptables.path'
+check     'the error is also on stderr' has stderr 'missing/ipset not found'
+check     'no INPUT rule is inserted' lacks calls.log '-I INPUT'
+log_lacks '] BLOCK =>'
+check     'the dump file is unchanged' has sipban.dump 'add sipban 198.51.100.200 '
+
+echo "== ipset fails to block and to save"
+IPSET_FAIL="add save" "$T/run.sh" ok 8
+log_has   'ERROR => ipset could not block 198.51.100.20 (Invalid Account, AccountID admin): ipset v6.11: simulated failure of add'
+log_lacks '] BLOCK => 198.51.100.20'
+console_has '198.51.100.20 could not be blocked (see the log)'
+log_has   'ERROR => ipset could not save the set sipban'
+check     'the dump file is kept' has sipban.dump 'add sipban 198.51.100.200 '
 no_errors
 
 echo
