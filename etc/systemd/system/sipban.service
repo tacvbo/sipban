@@ -9,9 +9,14 @@ Group=root
 ExecStart=/usr/local/bin/sipban.pl
 Restart=always
 RestartSec=3
+# exit status of an error at startup (e.g. a wrong path in /etc/sipban.conf):
+# restarting would only repeat the error
+RestartPreventExitStatus=78
 
-# sipban writes its own log (log.file in /etc/sipban.conf); discard stdout
+# sipban writes its own log (log.file in /etc/sipban.conf); discard stdout,
+# but keep the errors in the journal ("systemctl status sipban")
 StandardOutput=null
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

@@ -56,6 +56,7 @@ console_has '198.51.100.20 is already blocked'
 console_has '203.0.113.10 (registered contact)'
 console_has '198.51.100.30 (successful authentication)'
 console_has '198.51.100.20 unblocked'
+check     'exit status 0 after SIGTERM' has exit_status '0'
 check     'dump keeps the earlier block' has sipban.dump 'add sipban 198.51.100.200 '
 check     'dump lacks the whitelisted IP' lacks sipban.dump '192.0.2.99'
 no_errors
@@ -98,6 +99,7 @@ check     'the error is also on stderr' has stderr 'missing/ipset not found'
 check     'no INPUT rule is inserted' lacks calls.log '-I INPUT'
 log_lacks '] BLOCK =>'
 check     'the dump file is unchanged' has sipban.dump 'add sipban 198.51.100.200 '
+check     'exit status 78, so systemd does not restart it' has exit_status '78'
 
 echo "== empty dump file (left by an older version after a failed save)"
 DUMP=empty "$T/run.sh" ok 4

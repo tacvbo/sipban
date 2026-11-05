@@ -580,11 +580,13 @@ sub Run_Command {
 }
 
 # Log the reason and stop: without the set and the INPUT rule, nothing would
-# be blocked
+# be blocked. The exit status 78 (EX_CONFIG) tells systemd not to restart
+# sipban (RestartPreventExitStatus in sipban.service).
 sub Fatal {
     my $msg = shift;
     print LOG Time_Stamp() . " ERROR => $msg\n";
-    die "sipban: $msg\n";
+    print STDERR "sipban: $msg\n";
+    exit(78);
 }
 
 # Write a log line at most once per hour for the same key

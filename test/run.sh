@@ -51,7 +51,13 @@ sleep "$SECONDS_BEFORE_CONSOLE"
 perl "$T/console.pl" 14451 "block 192.0.2.5" "block 198.51.100.20" "trusted" \
      "unblock 198.51.100.20" "block" "quit" > "$W/console.out" 2> "$W/console.err"
 kill -TERM $SIPBAN 2>/dev/null
-sleep 1
+for i in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 $SIPBAN 2>/dev/null || break
+    sleep 0.5
+done
+kill -KILL $SIPBAN 2>/dev/null
+wait $SIPBAN 2>/dev/null
+echo $? > "$W/exit_status"
 kill $AMI 2>/dev/null
 wait 2>/dev/null
 exit 0

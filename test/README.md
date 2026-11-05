@@ -35,7 +35,7 @@ Requirements: Perl 5 with its core modules, and the ports 15038 (AMI) and
 | INPUT rule left by an unclean stop | sipban deletes the leftover copies, inserts the rule once and deletes it on stop. |
 | empty dump file | An empty or damaged dump file (older versions left it empty after a failed save) does not stop sipban: it starts with an empty set. |
 | no dump file | sipban creates the set and saves it on stop. |
-| wrong ipset path | sipban refuses to start with a clear error, inserts no rule and keeps the dump file. |
+| wrong ipset path | sipban refuses to start with a clear error and exit status 78, inserts no rule and keeps the dump file. |
 | ipset fails to block and to save | The failures are logged as `ERROR` instead of `BLOCK`, the console reports them, and the dump file is kept. |
 
 To check that a change does not break anything, run `test/test.sh` before
@@ -85,6 +85,7 @@ dump file and the log to `test/`.
 | `stderr`, `stdout` | Output of sipban (empty, unless sipban stops with an error). |
 | `console.err` | Errors of the console client (e.g. when sipban did not start). |
 | `ami.err` | Number of PJSIPShowContacts requests. |
+| `exit_status` | Exit status of sipban: 0 after SIGTERM, 78 after an error at startup. |
 
 ## Limits
 
