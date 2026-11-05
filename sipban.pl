@@ -278,10 +278,9 @@ sub Ipset_Purge_White_List {
 sub Ipset_Load_Ban_IP {
     %ban_ip = ();
     # /usr/sbin/ipset list sipban (one "<ip> timeout <seconds>" line per member)
-    my @rv = qx($ips list $Config{'ipset.set_name'});
+    my ($ok, $output) = Run_Command("$ips list $Config{'ipset.set_name'} 2>&1");
     my $now = time();
-    foreach my $line (@rv) {
-        chomp($line);
+    foreach my $line (split(/\n/, $output)) {
         my ($ip, $timeout) = $line =~ /^(.*)\stimeout\s(.*)/;
         if ($ip =~ /$IPv4/) {
             $ban_ip{$ip} = $now + $timeout;
@@ -1070,23 +1069,17 @@ if (-e $Config{'iptables.white_list'}) {
     close (WL);
 }
 
-# Load the blocked IPs. If the set still exists (unclean stop), the dump file
-# is merged into it; otherwise the set is restored from the dump file, or
-# created empty.
-if ( Ipset_Exists_Set() ) {
-    Ipset_Restore_Set();
-    Ipset_Load_Ban_IP();
-}
-else {
+# Load the blocked IPs from the dump file (merged into the set if it still
+# exists after an unclean stop). Without a dump file, or with an empty or
+# damaged one, the set is created empty.
+Ipset_Restore_Set();
+unless (Ipset_Exists_Set()) {
     if (-e $Config{'ipset.dump'}) {
-        Ipset_Restore_Set();
-        Ipset_Load_Ban_IP();
+        print LOG Time_Stamp() . " IPSET => $Config{'ipset.dump'} does not create the set $Config{'ipset.set_name'} (empty or damaged), starting with an empty set\n";
     }
-    else {
-        Ipset_Create_Set();
-    }
+    Ipset_Create_Set();
 }
-Fatal("the ipset set $Config{'ipset.set_name'} does not exist (see the previous errors)") unless (Ipset_Exists_Set());
+Ipset_Load_Ban_IP();
 Ipset_Purge_White_List();
 
 # Insert the INPUT rule; the copies left by an unclean stop are deleted first

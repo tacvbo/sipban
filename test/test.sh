@@ -99,6 +99,22 @@ check     'no INPUT rule is inserted' lacks calls.log '-I INPUT'
 log_lacks '] BLOCK =>'
 check     'the dump file is unchanged' has sipban.dump 'add sipban 198.51.100.200 '
 
+echo "== empty dump file (left by an older version after a failed save)"
+DUMP=empty "$T/run.sh" ok 4
+log_has   'does not create the set sipban (empty or damaged), starting with an empty set'
+log_has   'IPSET => set sipban created'
+log_has   'IPTABLES => INPUT rule for set sipban created'
+log_has   '] BLOCK => 198.51.100.20 (Invalid Account, AccountID admin)'
+no_errors
+
+echo "== no dump file"
+DUMP=none "$T/run.sh" ok 4
+log_lacks 'empty or damaged'
+log_has   'IPSET => set sipban created'
+log_has   '] BLOCK => 198.51.100.20 (Invalid Account, AccountID admin)'
+check     'the dump file is saved on stop' has sipban.dump 'add sipban 198.51.100.60 '
+no_errors
+
 echo "== ipset fails to block and to save"
 IPSET_FAIL="add save" "$T/run.sh" ok 8
 log_has   'ERROR => ipset could not block 198.51.100.20 (Invalid Account, AccountID admin): ipset v6.11: simulated failure of add'

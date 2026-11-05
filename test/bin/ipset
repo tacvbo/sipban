@@ -24,9 +24,19 @@ case "$1" in
     echo "create $2 hash:net family inet hashsize 4096 maxelem 65536 timeout 604800"
     [ -e "$D/members" ] && sed "s/^/add $2 /; s/\$/ timeout 600000/" "$D/members" ;;
   restore)
-    touch "$D/set" "$D/members"
+    # as the real ipset: only a "create" line creates the set
+    line=0
     while read -r command name ip rest; do
-      [ "$command" = add ] && { grep -qxF "$ip" "$D/members" || echo "$ip" >> "$D/members"; }
+      line=$((line + 1))
+      case "$command" in
+        create) touch "$D/set" "$D/members" ;;
+        add)
+          if [ ! -e "$D/set" ]; then
+            echo "ipset v6.11: Error in line $line: The set with the given name does not exist" >&2
+            exit 1
+          fi
+          grep -qxF "$ip" "$D/members" || echo "$ip" >> "$D/members" ;;
+      esac
     done ;;
   add) touch "$D/members"; grep -qxF "$3" "$D/members" || echo "$3" >> "$D/members" ;;
   del) touch "$D/members"; grep -vxF "$3" "$D/members" > "$D/members.tmp"; mv "$D/members.tmp" "$D/members" ;;

@@ -33,6 +33,8 @@ Requirements: Perl 5 with its core modules, and the ports 15038 (AMI) and
 | no contacts | "No Contacts found" is not an error: sipban keeps asking. |
 | configuration of version 1.0 | A configuration without `[trust]` and `flood.grace` works with the defaults. |
 | INPUT rule left by an unclean stop | sipban deletes the leftover copies, inserts the rule once and deletes it on stop. |
+| empty dump file | An empty or damaged dump file (older versions left it empty after a failed save) does not stop sipban: it starts with an empty set. |
+| no dump file | sipban creates the set and saves it on stop. |
 | wrong ipset path | sipban refuses to start with a clear error, inserts no rule and keeps the dump file. |
 | ipset fails to block and to save | The failures are logged as `ERROR` instead of `BLOCK`, the console reports them, and the dump file is kept. |
 
@@ -68,6 +70,8 @@ dump file and the log to `test/`.
 * `CONF_SED`: sed expression applied to the configuration, e.g. to use a
   wrong ipset path.
 * `IPSET_FAIL`: ipset commands that fail, e.g. `IPSET_FAIL="add save"`.
+* `DUMP`: dump file at startup: `previous` (default, two blocked IPs),
+  `empty` (0 bytes) or `none`.
 
 ## Results in work/
 
